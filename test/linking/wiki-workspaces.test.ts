@@ -32,6 +32,11 @@ import {
 const temporaryRoots: string[] = [];
 
 /**
+ * Valid registry text size that exceeds the production two-megabyte limit.
+ */
+const OVERSIZED_REGISTRY_BYTES = 2 * 1024 * 1024 + 1;
+
+/**
  * Creates an isolated directory and records it for cleanup.
  *
  * @param prefix - Temporary directory name prefix.
@@ -357,5 +362,22 @@ describe("wiki workspaces", () => {
     await expect(
       resolveWikiSearchScope(first, undefined, storage),
     ).rejects.toThrow("unavailable repository wiki");
+  });
+
+  test("rejects an oversized registry before accepting valid JSON", async () => {
+    const storage = await createStorage();
+    const registry = JSON.stringify({
+      version: 1,
+      wikis: [],
+      workspaces: [],
+      active: [],
+    });
+    await writeFile(
+      path.join(storage.configDirectory!, WIKI_WORKSPACES_FILE),
+      registry.padEnd(OVERSIZED_REGISTRY_BYTES, " "),
+      "utf8",
+    );
+
+    await expect(readWikiWorkspaceRegistry(storage)).rejects.toThrow("invalid");
   });
 });

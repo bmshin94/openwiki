@@ -182,6 +182,34 @@ describe("repository wiki retrieval", () => {
     expect(result.results[0]?.content).not.toContain("intentionally absent");
   });
 
+  test("creates safe anchors from headings containing nested HTML", async () => {
+    const root = await createRoot();
+    await writeFile(
+      path.join(root, "openwiki/architecture/anchors.md"),
+      page({
+        title: "Anchor Safety",
+        description: "Heading anchor safety behavior.",
+        source: "src/anchors.ts",
+        body: [
+          "## <em>Retry</em> <script<script>>control</script>",
+          "",
+          "The circuit breaker owns nested sanitization behavior.",
+        ].join("\n"),
+      }),
+      "utf8",
+    );
+
+    const result = requireSearchResults(
+      await searchWiki(root, { query: "nested sanitization circuit breaker" }),
+    );
+    const reference = result.results[0]?.ref[0];
+
+    expect(reference).toMatch(
+      /^openwiki\/architecture\/anchors\.md#[\p{L}\p{N}_-]+$/u,
+    );
+    expect(reference).not.toContain("<script");
+  });
+
   test("source paths boost otherwise ambiguous matches", async () => {
     const root = await createRoot();
     await writeFile(

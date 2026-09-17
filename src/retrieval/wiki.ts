@@ -785,7 +785,7 @@ function headingSections(tokens: Token[]): ParsedHeadingSection[] {
   for (const [index, token] of tokens.entries()) {
     if (token.type !== "heading") continue;
     const heading = token as Tokens.Heading;
-    const base = headingSlug(heading.text);
+    const base = headingSlug(heading);
     const count = slugs.get(base) ?? 0;
     slugs.set(base, count + 1);
     headings.push({
@@ -1035,15 +1035,35 @@ function normalizeSectionAnchor(value: string): string {
 /**
  * Produces the GitHub-compatible base anchor for one Markdown heading.
  *
- * @param heading - Parsed human-readable heading text.
+ * @param heading - Parsed Markdown heading.
  * @returns Lowercase anchor before duplicate suffixing.
  */
-function headingSlug(heading: string): string {
-  return heading
+function headingSlug(heading: Tokens.Heading): string {
+  return inlineHeadingText(heading.tokens)
     .toLowerCase()
-    .replace(/<[^>]*>/gu, "")
     .replace(/[^\p{L}\p{N}_\s-]/gu, "")
     .replace(/ /gu, "-");
+}
+
+/**
+ * Extracts visible heading text without retaining raw HTML tokens.
+ *
+ * @param tokens - Parsed inline heading tokens.
+ * @returns Concatenated textual content used to form an anchor.
+ */
+function inlineHeadingText(tokens: readonly Token[]): string {
+  return tokens
+    .map((token) => {
+      if (token.type === "html") return "";
+      if ("tokens" in token && Array.isArray(token.tokens)) {
+        return inlineHeadingText(token.tokens);
+      }
+      if ("text" in token && typeof token.text === "string") {
+        return token.text;
+      }
+      return token.type === "br" ? " " : "";
+    })
+    .join("");
 }
 
 /**

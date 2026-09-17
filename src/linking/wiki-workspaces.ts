@@ -1,12 +1,9 @@
-import type { Dirent } from "node:fs";
 import {
-  chmod,
-  lstat,
-  mkdir,
-  readFile,
-  readdir,
-  realpath,
-} from "node:fs/promises";
+  constants as fsConstants,
+  type BigIntStats,
+  type Dirent,
+} from "node:fs";
+import { chmod, lstat, mkdir, open, readdir, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { UPDATE_METADATA_PATH } from "../config/constants.js";
@@ -463,20 +460,14 @@ export async function readWikiWorkspaceRegistry(
   options: WikiWorkspaceStorageOptions = {},
 ): Promise<WikiWorkspaceRegistry> {
   const registryPath = workspaceRegistryPath(options);
-  let content: string;
+  let content: string | null;
   try {
-    const metadata = await lstat(registryPath);
-    if (!metadata.isFile() || metadata.size > MAX_REGISTRY_BYTES) {
-      throw invalidRegistryError();
-    }
-    content = await readFile(registryPath, "utf8");
+    content = await readWorkspaceRegistryFile(registryPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return emptyWikiWorkspaceRegistry();
-    }
     if (error instanceof WikiWorkspaceError) throw error;
     throw invalidRegistryError();
   }
+  if (content === null) return emptyWikiWorkspaceRegistry();
 
   let parsed: unknown;
   try {
@@ -486,6 +477,85 @@ export async function readWikiWorkspaceRegistry(
   }
   if (!isWikiWorkspaceRegistry(parsed)) throw invalidRegistryError();
   return parsed;
+}
+
+/**
+ * Reads the workspace registry through the same descriptor that is validated.
+ *
+ * @param registryPath - Absolute workspace registry path.
+ * @returns Registry text, or `null` when no registry exists.
+ */
+async function readWorkspaceRegistryFile(
+  registryPath: string,
+): Promise<string | null> {
+  let inspectedStats: BigIntStats;
+  try {
+    inspectedStats = await lstat(registryPath, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (
+    !inspectedStats.isFile() ||
+    inspectedStats.size > BigInt(MAX_REGISTRY_BYTES)
+  ) {
+    throw invalidRegistryError();
+  }
+
+  const fileHandle = await open(registryPath, workspaceRegistryOpenFlags());
+  try {
+    const openedStats = await fileHandle.stat({ bigint: true });
+    if (
+      !isSameWorkspaceRegistryFile(inspectedStats, openedStats) ||
+      openedStats.size > BigInt(MAX_REGISTRY_BYTES)
+    ) {
+      throw invalidRegistryError();
+    }
+    const content = await fileHandle.readFile("utf8");
+    if (Buffer.byteLength(content, "utf8") > MAX_REGISTRY_BYTES) {
+      throw invalidRegistryError();
+    }
+    return content;
+  } finally {
+    await fileHandle.close();
+  }
+}
+
+/**
+ * Verifies that an opened registry is the regular file inspected by path.
+ *
+ * @param inspectedStats - Non-following metadata captured before opening.
+ * @param openedStats - Metadata captured from the opened descriptor.
+ * @returns Whether both observations identify the same regular file.
+ */
+function isSameWorkspaceRegistryFile(
+  inspectedStats: BigIntStats,
+  openedStats: BigIntStats,
+): boolean {
+  if (!openedStats.isFile()) return false;
+  if (process.platform !== "win32") {
+    return (
+      inspectedStats.dev === openedStats.dev &&
+      inspectedStats.ino === openedStats.ino
+    );
+  }
+  return (
+    inspectedStats.size === openedStats.size &&
+    inspectedStats.mtimeNs === openedStats.mtimeNs &&
+    inspectedStats.birthtimeNs === openedStats.birthtimeNs
+  );
+}
+
+/**
+ * Builds read-only flags that reject a final symlink when supported.
+ *
+ * @returns Numeric flags for opening the workspace registry.
+ */
+function workspaceRegistryOpenFlags(): number {
+  return (
+    fsConstants.O_RDONLY |
+    (typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0)
+  );
 }
 
 /**
