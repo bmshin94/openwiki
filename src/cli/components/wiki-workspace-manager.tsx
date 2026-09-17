@@ -5,7 +5,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import type {
   DiscoveredRepository,
-  DiscoveredWiki,
   WikiWorkspaceDraft,
 } from "../../linking/wiki-workspaces.js";
 
@@ -35,11 +34,6 @@ export interface WikiWorkspaceManagerProps {
     finderPath: string,
     signal: AbortSignal,
   ) => AsyncIterable<DiscoveredRepository>;
-
-  /**
-   * Resolves an additional direct repository or nested path.
-   */
-  discoverLocation: (location: string) => Promise<DiscoveredWiki[]>;
 
   /**
    * Receives the complete final workspace collection on Finish.
@@ -138,21 +132,6 @@ interface WorkspaceNameScreen {
 }
 
 /**
- * Additional direct repository-path text-entry screen.
- */
-interface WorkspaceLocationScreen {
-  /**
-   * Screen discriminator.
-   */
-  kind: "location";
-
-  /**
-   * Manager identity of the workspace receiving candidates.
-   */
-  workspaceKey: string;
-}
-
-/**
  * Complete top-level workspace-manager screen state.
  */
 type ManagerScreen =
@@ -160,8 +139,7 @@ type ManagerScreen =
   | WorkspaceActionsScreen
   | WorkspaceEditScreen
   | WorkspaceDeleteScreen
-  | WorkspaceNameScreen
-  | WorkspaceLocationScreen;
+  | WorkspaceNameScreen;
 
 /**
  * One selectable row in the workspace member editor.
@@ -170,7 +148,7 @@ interface EditorRow {
   /**
    * Row behavior discriminator.
    */
-  kind: "selected" | "repository" | "path" | "save" | "back";
+  kind: "selected" | "repository" | "save" | "back";
 
   /**
    * Repository associated with a selected or finder row.
@@ -208,7 +186,6 @@ export function WikiWorkspaceManager({
   initialWorkspaces,
   finderRoot,
   findRepositories,
-  discoverLocation,
   onSubmit,
   onCancel,
 }: WikiWorkspaceManagerProps): React.JSX.Element {
@@ -234,7 +211,6 @@ export function WikiWorkspaceManager({
   const [input, setInput] = useState("");
   const [editRoots, setEditRoots] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(true);
 
   const selectedWorkspace =
@@ -355,53 +331,6 @@ export function WikiWorkspaceManager({
   }
 
   /**
-   * Resolves and selects a direct repository path from the current input.
-   */
-  async function submitLocation(): Promise<void> {
-    if (screen.kind !== "location" || busy) return;
-    const location = input.trim();
-    if (!location) {
-      setMessage("Enter a repository path.");
-      return;
-    }
-    setBusy(true);
-    setMessage(null);
-    try {
-      const found = await discoverLocation(location);
-      if (found.length === 0) {
-        setMessage("No OpenWiki repository was found at that location.");
-        return;
-      }
-      setKnownRepositories((current) =>
-        mergeRepositories(
-          current,
-          found.map((repository) => ({
-            ...repository,
-            hasOpenWiki: true,
-          })),
-        ),
-      );
-      if (found.length === 1) {
-        setEditRoots((current) => new Set([...current, found[0].root]));
-      }
-      navigate({ kind: "edit", workspaceKey: screen.workspaceKey });
-      setMessage(
-        found.length === 1
-          ? `Added ${found[0].name}.`
-          : `Added ${found.length} repositories.`,
-      );
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Unable to inspect that location.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /**
    * Toggles a selectable repository row or explains why it is unavailable.
    *
    * @param row - Active selected or finder row.
@@ -427,18 +356,15 @@ export function WikiWorkspaceManager({
   }
 
   useInput((inputValue, key) => {
-    if (busy) return;
     if (key.ctrl && inputValue === "c") {
       onCancel();
       exit();
       return;
     }
 
-    if (screen.kind === "name" || screen.kind === "location") {
+    if (screen.kind === "name") {
       if (key.escape) {
-        if (screen.kind === "location") {
-          navigate({ kind: "edit", workspaceKey: screen.workspaceKey });
-        } else if (screen.mode === "rename" && screen.workspaceKey) {
+        if (screen.mode === "rename" && screen.workspaceKey) {
           navigate({ kind: "actions", workspaceKey: screen.workspaceKey });
         } else {
           navigate({ kind: "workspaces" });
@@ -446,8 +372,7 @@ export function WikiWorkspaceManager({
         return;
       }
       if (key.return) {
-        if (screen.kind === "name") submitName();
-        else void submitLocation();
+        submitName();
         return;
       }
       if (key.backspace || key.delete) {
@@ -547,8 +472,6 @@ export function WikiWorkspaceManager({
       const row = editorRows[cursor];
       if (row?.kind === "selected" || row?.kind === "repository") {
         chooseRepository(row);
-      } else if (row?.kind === "path") {
-        navigate({ kind: "location", workspaceKey: selectedWorkspace.key });
       } else if (row?.kind === "save") {
         if (editRoots.size < 2) {
           setMessage(
@@ -607,9 +530,6 @@ export function WikiWorkspaceManager({
           }
           value={input}
         />
-      ) : null}
-      {screen.kind === "location" ? (
-        <TextEntry label="Repository path" value={input} busy={busy} />
       ) : null}
       {message ? <Text color="yellow">{message}</Text> : null}
       <Box marginTop={1}>
@@ -746,8 +666,7 @@ function WorkspaceEditor({
   );
   const visibleRepositories = repositoryWindow(repositoryRows, cursor);
   const actionRows = indexedRows.filter(
-    ({ row }) =>
-      row.kind === "path" || row.kind === "save" || row.kind === "back",
+    ({ row }) => row.kind === "save" || row.kind === "back",
   );
 
   return (
@@ -891,31 +810,19 @@ interface TextEntryProps {
    * Current plain-text value.
    */
   value: string;
-
-  /**
-   * Whether asynchronous validation is running.
-   */
-  busy?: boolean;
 }
 
 /**
  * Renders one simple terminal text field.
  *
- * @param props - Prompt label, value, and busy state.
+ * @param props - Prompt label and value.
  * @returns Ink text-entry view.
  */
-function TextEntry({
-  label,
-  value,
-  busy = false,
-}: TextEntryProps): React.JSX.Element {
+function TextEntry({ label, value }: TextEntryProps): React.JSX.Element {
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text>{label}</Text>
-      <Text color="cyan">
-        › {value}
-        {busy ? "…" : "_"}
-      </Text>
+      <Text color="cyan">› {value}_</Text>
     </Box>
   );
 }
@@ -1058,7 +965,6 @@ function createEditorRows(
       repository,
       selected: selectedRoots.has(repository.root),
     })),
-    { kind: "path" },
     { kind: "save" },
     { kind: "back" },
   ];
@@ -1227,7 +1133,6 @@ function screenWorkspaceKey(screen: ManagerScreen): string | undefined {
  * @returns Human-readable action label.
  */
 function editorActionLabel(kind: EditorRow["kind"]): string {
-  if (kind === "path") return "Add repository path";
   if (kind === "save") return "Save workspace";
   if (kind === "back") return "Back";
   return "";
@@ -1240,7 +1145,7 @@ function editorActionLabel(kind: EditorRow["kind"]): string {
  * @returns Footer text.
  */
 function footerForScreen(screen: ManagerScreen): string {
-  if (screen.kind === "name" || screen.kind === "location") {
+  if (screen.kind === "name") {
     return "Enter confirm · Esc back · Ctrl-C cancel";
   }
   if (screen.kind === "edit") {

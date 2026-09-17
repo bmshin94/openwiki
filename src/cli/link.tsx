@@ -5,7 +5,6 @@ import { resolveRepositoryRoot } from "../integrations/core/repository-root.js";
 import {
   clearActiveWikiWorkspace,
   discoverRepositoriesFromPath,
-  discoverWikiLocation,
   listWikiWorkspaces,
   readWikiWorkspaceRegistry,
   resolveRepositoryFinderRoot,
@@ -13,7 +12,6 @@ import {
   setActiveWikiWorkspace,
   workspaceDrafts,
   type DiscoveredRepository,
-  type DiscoveredWiki,
   type WikiWorkspaceDraft,
 } from "../linking/wiki-workspaces.js";
 import { getErrorMessage } from "../platform/diagnostics.js";
@@ -44,7 +42,6 @@ export async function runLinkCommand(
       finderRoot,
       (finderPath, signal) =>
         discoverRepositoriesFromPath(finderPath, baseDirectory, signal),
-      (location) => discoverWikiLocation(location, baseDirectory),
     );
     if (!result) {
       process.exitCode = 0;
@@ -98,7 +95,6 @@ export async function runWorkspaceCommand(
  * @param initialWorkspaces - Complete initial workspace collection.
  * @param finderRoot - Canonical directory searched for repositories.
  * @param findRepositories - Creates the streaming repository scan.
- * @param discoverLocation - Additional location resolver.
  * @returns Final collection or `null` after cancellation.
  */
 async function manageWikiWorkspaces(
@@ -108,7 +104,6 @@ async function manageWikiWorkspaces(
     finderPath: string,
     signal: AbortSignal,
   ) => AsyncIterable<DiscoveredRepository>,
-  discoverLocation: (location: string) => Promise<DiscoveredWiki[]>,
 ): Promise<WikiWorkspaceDraft[] | null> {
   let result: WikiWorkspaceDraft[] | null = null;
   const instance = render(
@@ -116,7 +111,6 @@ async function manageWikiWorkspaces(
       initialWorkspaces={initialWorkspaces}
       finderRoot={finderRoot}
       findRepositories={findRepositories}
-      discoverLocation={discoverLocation}
       onSubmit={(workspaces) => {
         result = workspaces;
       }}

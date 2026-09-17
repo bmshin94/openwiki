@@ -15,7 +15,6 @@ import {
   clearActiveWikiWorkspace,
   discoverRepositories,
   discoverRepositoriesFromPath,
-  discoverWikiLocation,
   listWikiWorkspaces,
   listWorkspaceWikis,
   readWikiWorkspaceRegistry,
@@ -99,7 +98,7 @@ afterEach(async () => {
 });
 
 describe("wiki workspaces", () => {
-  test("streams all repositories and directly resolves an OpenWiki path", async () => {
+  test("streams repositories and resolves partial finder paths", async () => {
     const directory = await createTemporaryRoot("openwiki-discovery-");
     const control = await createWikiRepository(directory, "control-plane");
     const openwiki = await createWikiRepository(directory, "openwiki");
@@ -113,8 +112,6 @@ describe("wiki workspaces", () => {
       "# Not initialized\n",
       "utf8",
     );
-    await mkdir(path.join(control, "src/nested"), { recursive: true });
-
     await expect(
       collectRepositories(discoverRepositories(directory)),
     ).resolves.toEqual([
@@ -142,11 +139,6 @@ describe("wiki workspaces", () => {
         path: "services/data-plane",
         hasOpenWiki: true,
       },
-    ]);
-    await expect(
-      discoverWikiLocation(path.join(control, "src/nested")),
-    ).resolves.toEqual([
-      { root: control, name: "control-plane", path: control },
     ]);
     await expect(
       collectRepositories(

@@ -103,7 +103,6 @@ describe("WikiWorkspaceManager", () => {
             hasOpenWiki: true,
           },
         )}
-        discoverLocation={vi.fn()}
         onSubmit={onSubmit}
         onCancel={vi.fn()}
       />,
@@ -121,7 +120,7 @@ describe("WikiWorkspaceManager", () => {
     await moveDown(view.stdin.write, 1);
     view.stdin.write(" ");
     await flush();
-    await moveDown(view.stdin.write, 3);
+    await moveDown(view.stdin.write, 2);
     view.stdin.write("\r");
     await flush();
     await moveDown(view.stdin.write, 3);
@@ -152,7 +151,6 @@ describe("WikiWorkspaceManager", () => {
         ]}
         finderRoot="/workspace"
         findRepositories={repositoryFinder()}
-        discoverLocation={vi.fn()}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
       />,
@@ -169,50 +167,6 @@ describe("WikiWorkspaceManager", () => {
     expect(stripAnsi(view.lastFrame())).toContain("Edit wikis");
     expect(stripAnsi(view.lastFrame())).toContain("Rename");
     expect(stripAnsi(view.lastFrame())).toContain("Delete");
-    view.unmount();
-  });
-
-  test("adds one direct repository path to the current selection", async () => {
-    const discoverLocation = vi.fn().mockResolvedValue([
-      {
-        root: "/elsewhere/infra",
-        name: "infra",
-        path: "/elsewhere/infra",
-      },
-    ]);
-    const view = render(
-      <WikiWorkspaceManager
-        initialWorkspaces={[
-          {
-            id: "payments",
-            name: "Payments",
-            roots: ["/workspace/control", "/workspace/data"],
-          },
-        ]}
-        finderRoot="/workspace"
-        findRepositories={repositoryFinder()}
-        discoverLocation={discoverLocation}
-        onSubmit={vi.fn()}
-        onCancel={vi.fn()}
-      />,
-    );
-    await flush();
-
-    view.stdin.write("\r");
-    await flush();
-    view.stdin.write("\r");
-    await flush();
-    await moveDown(view.stdin.write, 4);
-    view.stdin.write("\r");
-    await flush();
-    view.stdin.write("/elsewhere/infra");
-    await flush();
-    view.stdin.write("\r");
-    await flush();
-    await flush();
-
-    expect(discoverLocation).toHaveBeenCalledWith("/elsewhere/infra");
-    expect(stripAnsi(view.lastFrame())).toContain("● /elsewhere/infra");
     view.unmount();
   });
 
@@ -241,7 +195,6 @@ describe("WikiWorkspaceManager", () => {
             hasOpenWiki: false,
           },
         )}
-        discoverLocation={vi.fn()}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
       />,
@@ -309,7 +262,6 @@ describe("WikiWorkspaceManager", () => {
             hasOpenWiki: true,
           },
         )}
-        discoverLocation={vi.fn()}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
       />,

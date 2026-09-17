@@ -65,9 +65,9 @@ const EXPECTED_DISCOVERY_ERROR_CODES = new Set([
 const IDENTIFIER_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
 
 /**
- * One repository wiki found through a direct path or directory scan.
+ * One Git repository shown by the interactive repository finder.
  */
-export interface DiscoveredWiki {
+export interface DiscoveredRepository {
   /**
    * Canonical absolute repository root.
    */
@@ -82,12 +82,7 @@ export interface DiscoveredWiki {
    * Display path relative to the directory being inspected when possible.
    */
   path: string;
-}
 
-/**
- * One Git repository shown by the interactive repository finder.
- */
-export interface DiscoveredRepository extends DiscoveredWiki {
   /**
    * Whether the repository contains OpenWiki run metadata and can be linked.
    */
@@ -456,36 +451,6 @@ export async function* discoverRepositories(
       });
     }
   }
-}
-
-/**
- * Resolves one user-entered direct repository location.
- *
- * A path inside a linkable repository returns only that repository. This direct
- * resolver never starts recursive discovery.
- *
- * @param location - Direct repository root or a nested path inside it.
- * @param baseDirectory - Directory used to resolve a relative location.
- * @returns The single repository wiki found at the location.
- */
-export async function discoverWikiLocation(
-  location: string,
-  baseDirectory: string = process.cwd(),
-): Promise<DiscoveredWiki[]> {
-  const resolved = resolveUserPath(location, baseDirectory);
-  const directory = await canonicalDirectory(resolved);
-  const containingRepository = await findContainingGitRepository(directory);
-  if (!containingRepository) {
-    throw new WikiWorkspaceError(
-      "That location is not inside a Git repository.",
-    );
-  }
-  if (!(await hasOpenWikiMetadata(containingRepository))) {
-    throw new WikiWorkspaceError(
-      `That repository does not contain ${UPDATE_METADATA_PATH}. Initialize its OpenWiki before linking it.`,
-    );
-  }
-  return [discoveredWiki(directory, containingRepository)];
 }
 
 /**
@@ -1370,24 +1335,6 @@ async function nearestExistingDirectory(location: string): Promise<string> {
 }
 
 /**
- * Finds the nearest containing Git repository without crossing the root.
- *
- * @param directory - Canonical directory at which to begin.
- * @returns Canonical repository root or `null` when the path is not in one.
- */
-async function findContainingGitRepository(
-  directory: string,
-): Promise<string | null> {
-  let candidate = directory;
-  while (true) {
-    if (await isGitRepository(candidate)) return candidate;
-    const parent = path.dirname(candidate);
-    if (parent === candidate) return null;
-    candidate = parent;
-  }
-}
-
-/**
  * Checks whether a directory is a Git repository with OpenWiki run metadata.
  *
  * @param directory - Canonical candidate repository root.
@@ -1485,25 +1432,6 @@ function isDiscoverableDirectory(entry: Dirent<string>): boolean {
 }
 
 /**
- * Creates one display-oriented discovered wiki entry.
- *
- * @param displayRoot - Directory against which the path should be displayed.
- * @param repositoryRoot - Canonical repository root.
- * @returns Discovered wiki metadata.
- */
-function discoveredWiki(
-  displayRoot: string,
-  repositoryRoot: string,
-): DiscoveredWiki {
-  const repository = discoveredRepositoryMetadata(displayRoot, repositoryRoot);
-  return {
-    root: repository.root,
-    name: repository.name,
-    path: repository.path,
-  };
-}
-
-/**
  * Creates one repository-finder entry and checks its OpenWiki marker.
  *
  * @param displayRoot - Directory against which the path should be displayed.
@@ -1530,7 +1458,7 @@ async function discoveredRepository(
 function discoveredRepositoryMetadata(
   displayRoot: string,
   repositoryRoot: string,
-): DiscoveredWiki {
+): Omit<DiscoveredRepository, "hasOpenWiki"> {
   const relative = path.relative(displayRoot, repositoryRoot);
   const name = path.basename(repositoryRoot);
   const displayPath =
