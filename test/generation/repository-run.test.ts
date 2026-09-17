@@ -1586,6 +1586,54 @@ describe("repository page queue", () => {
     });
   });
 
+  test("leaves another pending job's page and sidecar untouched on submit", async () => {
+    const root = await createRepository(["second.md"]);
+    const run = await beginForcedUpdate(root);
+    await submitRepositoryPlan(run, {
+      pages: [
+        { path: "/openwiki/quickstart.md", title: "Q", purpose: "Refresh." },
+        { path: "/openwiki/second.md", title: "S", purpose: "Refresh." },
+      ],
+    });
+    const jobs = run.state.plan?.pages ?? [];
+    const headJob = jobs.find(({ path }) => path === "/openwiki/second.md");
+    const tailJob = jobs.find(({ path }) => path === "/openwiki/quickstart.md");
+    if (!headJob || !tailJob) throw new Error("Expected both plan jobs.");
+
+    // A concurrent worker owns quickstart and has written partial content.
+    const partial = "---\ntype: Guide\ntitle: Partial\n---\n\n# Half written\n";
+    await run.backend.write(tailJob.path, partial);
+    const sidecarPath = path.join(
+      root,
+      "openwiki",
+      ".claims",
+      "quickstart.json",
+    );
+    const sidecarBefore = await readFile(sidecarPath, "utf8");
+
+    await run.backend.write(headJob.path, validPage("Second"));
+    await submitRepositoryPage(run, {
+      jobId: headJob.id,
+      claims: [
+        {
+          statement: "The repository has a README.",
+          evidence: [{ resource: "repo://README.md" }],
+        },
+      ],
+    });
+
+    // Neither the in-flight Markdown nor its sidecar was restamped by the
+    // sibling's finalization; only the submitting page became durable.
+    await expect(
+      readFile(path.join(root, "openwiki", "quickstart.md"), "utf8"),
+    ).resolves.toBe(partial);
+    await expect(readFile(sidecarPath, "utf8")).resolves.toBe(sidecarBefore);
+    expect(run.state.plan?.pages.map(({ status }) => status)).toEqual([
+      "complete",
+      "pending",
+    ]);
+  });
+
   test("skips one owned job while another worker completes its own", async () => {
     const root = await createRepository(["second.md"]);
     const run = await beginForcedUpdate(root);

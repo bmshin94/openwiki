@@ -1354,7 +1354,17 @@ export async function submitRepositoryPage(
       // Persist the page's dirty Claim state before recording job completion.
       // Prove this page is durable before advancing the queue; the strict
       // whole-run proof waits until every PageJob is complete.
-      await run.claimsRuntime.finalize(run.state.startedAt);
+      //
+      // Pages still owned by other pending jobs are excluded: a concurrent
+      // worker may be mid-edit on them, so projecting a verification stamp
+      // into their front matter or rehashing their sidecar here would record
+      // transient bytes. Their own submit (or finish) finalizes them.
+      const otherPendingPages = new Set(
+        latestPlan.pages
+          .filter(({ id, status }) => status === "pending" && id !== current.id)
+          .map(({ path }) => path),
+      );
+      await run.claimsRuntime.finalize(run.state.startedAt, otherPendingPages);
       await assertPageClaimsDurable(run, current.path);
     } catch (error) {
       if (error instanceof RepositoryRunError) throw error;
