@@ -56,6 +56,12 @@ describe("canonical OpenWiki host skill", () => {
     const retrieval = section(skill, "Read repository memory");
     expect(retrieval).toContain("`openwiki_search");
     expect(retrieval).toContain("`openwiki_read");
+    expect(retrieval).toContain("`openwiki_list_workspaces");
+    expect(retrieval).toContain("`openwiki_list_wikis");
+    expect(retrieval).toContain("connected by `openwiki link`");
+    expect(retrieval).toContain(
+      "`openwiki_read({ root, wiki, page, sections })`",
+    );
     expect(retrieval).toContain("Neither operation starts a generation run");
     const required = section(skill, "Required sequence");
     const calls = [
@@ -80,7 +86,13 @@ describe("canonical OpenWiki host skill", () => {
       ),
     ].sort();
     expect(toolNames).toEqual(
-      [...calls, "openwiki_search", "openwiki_read"].sort(),
+      [
+        ...calls,
+        "openwiki_list_workspaces",
+        "openwiki_list_wikis",
+        "openwiki_search",
+        "openwiki_read",
+      ].sort(),
     );
     expect(skill).not.toContain("openwiki_resolve_claims");
   });

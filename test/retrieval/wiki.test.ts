@@ -1,13 +1,27 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
-import { readWikiSections, searchWiki } from "../../src/retrieval/wiki.ts";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import {
+  readWikiSections,
+  searchWiki,
+  type WikiSearchResponse,
+  type WikiSearchResults,
+} from "../../src/retrieval/wiki.ts";
+import {
+  saveWikiWorkspaces,
+  setActiveWikiWorkspace,
+} from "../../src/linking/wiki-workspaces.ts";
 
 /**
  * Temporary repository roots removed after each test.
  */
 const temporaryRoots: string[] = [];
+
+/**
+ * Original workspace registry override restored after each test.
+ */
+const originalConfigDirectory = process.env.OPENWIKI_CONFIG_DIR;
 
 /**
  * Inputs used to render one generated wiki-page fixture.
@@ -47,6 +61,28 @@ async function createRoot(): Promise<string> {
 }
 
 /**
+ * Creates one linkable repository wiki below a temporary workspace.
+ *
+ * @param workspace - Shared workspace root.
+ * @param name - Repository directory and expected wiki ID.
+ * @returns Absolute repository root.
+ */
+async function createLinkedRoot(
+  workspace: string,
+  name: string,
+): Promise<string> {
+  const root = path.join(workspace, name);
+  await mkdir(path.join(root, ".git"), { recursive: true });
+  await mkdir(path.join(root, "openwiki/architecture"), { recursive: true });
+  await writeFile(
+    path.join(root, "openwiki/quickstart.md"),
+    `# ${name} quickstart\n`,
+    "utf8",
+  );
+  return root;
+}
+
+/**
  * Renders one complete OKF wiki-page fixture.
  *
  * @param options - Page metadata, source, and authored body.
@@ -70,7 +106,33 @@ function page(options: WikiPageFixture): string {
   ].join("\n");
 }
 
+/**
+ * Narrows one search response expected to contain ranked results.
+ *
+ * @param response - Search response under test.
+ * @returns Successful ranked search response.
+ */
+function requireSearchResults(response: WikiSearchResponse): WikiSearchResults {
+  if (!("results" in response)) {
+    throw new Error("Expected a resolved wiki search scope.");
+  }
+  return response;
+}
+
+beforeEach(async () => {
+  const configDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "openwiki-retrieval-config-"),
+  );
+  temporaryRoots.push(configDirectory);
+  process.env.OPENWIKI_CONFIG_DIR = configDirectory;
+});
+
 afterEach(async () => {
+  if (originalConfigDirectory === undefined) {
+    delete process.env.OPENWIKI_CONFIG_DIR;
+  } else {
+    process.env.OPENWIKI_CONFIG_DIR = originalConfigDirectory;
+  }
   await Promise.all(
     temporaryRoots
       .splice(0)
@@ -104,9 +166,11 @@ describe("repository wiki retrieval", () => {
       "utf8",
     );
 
-    const result = await searchWiki(root, {
-      query: "Where is the retry budget and circuit breaker enforced?",
-    });
+    const result = requireSearchResults(
+      await searchWiki(root, {
+        query: "Where is the retry budget and circuit breaker enforced?",
+      }),
+    );
 
     expect(result.results[0]).toMatchObject({
       kind: "section",
@@ -139,11 +203,13 @@ describe("repository wiki retrieval", () => {
       "utf8",
     );
 
-    const result = await searchWiki(root, {
-      query: "validation rejects malformed requests",
-      paths: ["src/jobs/validate.ts"],
-      limit: 1,
-    });
+    const result = requireSearchResults(
+      await searchWiki(root, {
+        query: "validation rejects malformed requests",
+        paths: ["src/jobs/validate.ts"],
+        limit: 1,
+      }),
+    );
 
     expect(result.results[0]?.ref).toEqual([
       "openwiki/architecture/jobs.md#validation",
@@ -199,6 +265,145 @@ describe("repository wiki retrieval", () => {
         ].join("\n"),
       },
     ]);
+  });
+
+  test("linked search spans repositories and identifies results for exact reads", async () => {
+    const workspace = await mkdtemp(
+      path.join(os.tmpdir(), "openwiki-retrieval-"),
+    );
+    temporaryRoots.push(workspace);
+    const controlPlane = await createLinkedRoot(workspace, "control-plane");
+    const dataPlane = await createLinkedRoot(workspace, "data-plane");
+    await writeFile(
+      path.join(controlPlane, "openwiki/architecture/routing.md"),
+      page({
+        title: "Control Plane Routing",
+        description: "Desired route distribution and reconciliation.",
+        source: "src/routes/reconciler.ts",
+        body: "## Route publication\n\nThe control plane publishes signed route snapshots to every data-plane cell.",
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(dataPlane, "openwiki/architecture/requests.md"),
+      page({
+        title: "Data Plane Requests",
+        description: "Runtime request execution.",
+        source: "src/runtime/request.ts",
+        body: "## Request execution\n\nThe data plane applies the active route snapshot to each request.",
+      }),
+      "utf8",
+    );
+    await saveWikiWorkspaces([
+      { name: "Payments", roots: [controlPlane, dataPlane] },
+    ]);
+
+    const search = requireSearchResults(
+      await searchWiki(dataPlane, {
+        query: "Who publishes signed route snapshots?",
+      }),
+    );
+
+    expect(search).toMatchObject({
+      workspace: { id: "payments", name: "Payments", wikiCount: 2 },
+      wikis: [
+        { id: "control-plane", name: "control-plane" },
+        { id: "data-plane", name: "data-plane" },
+      ],
+    });
+    expect(search.results[0]).toMatchObject({
+      wiki: "control-plane",
+      ref: ["openwiki/architecture/routing.md#route-publication"],
+    });
+    await expect(
+      readWikiSections(dataPlane, {
+        wiki: "control-plane",
+        page: "openwiki/architecture/routing.md",
+        sections: ["route-publication"],
+      }),
+    ).resolves.toEqual({
+      wiki: "control-plane",
+      page: "openwiki/architecture/routing.md",
+      sections: [
+        {
+          section: "route-publication",
+          content:
+            "## Route publication\n\nThe control plane publishes signed route snapshots to every data-plane cell.",
+        },
+      ],
+    });
+  });
+
+  test("linked reads default locally and reject undiscovered wiki identities", async () => {
+    const workspace = await mkdtemp(
+      path.join(os.tmpdir(), "openwiki-retrieval-"),
+    );
+    temporaryRoots.push(workspace);
+    const controlPlane = await createLinkedRoot(workspace, "control-plane");
+    const dataPlane = await createLinkedRoot(workspace, "data-plane");
+    await writeFile(
+      path.join(dataPlane, "openwiki/architecture/runtime.md"),
+      page({
+        title: "Runtime",
+        description: "Data-plane runtime.",
+        source: "src/runtime.ts",
+        body: "## Startup\n\nThe runtime verifies its route snapshot.",
+      }),
+      "utf8",
+    );
+    await saveWikiWorkspaces([
+      { name: "Payments", roots: [controlPlane, dataPlane] },
+    ]);
+
+    await expect(
+      readWikiSections(dataPlane, {
+        page: "openwiki/architecture/runtime.md",
+        sections: ["startup"],
+      }),
+    ).resolves.not.toHaveProperty("wiki");
+    await expect(
+      readWikiSections(dataPlane, {
+        wiki: "unknown-service",
+        page: "openwiki/architecture/runtime.md",
+        sections: ["startup"],
+      }),
+    ).rejects.toThrow("Unknown wiki ID");
+  });
+
+  test("returns workspace choices until an overlap is active or explicit", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "openwiki-retrieval-"),
+    );
+    temporaryRoots.push(directory);
+    const shared = await createLinkedRoot(directory, "shared");
+    const payments = await createLinkedRoot(directory, "payments");
+    const platform = await createLinkedRoot(directory, "platform");
+    await saveWikiWorkspaces([
+      { name: "Payments", roots: [shared, payments] },
+      { name: "Platform", roots: [shared, platform] },
+    ]);
+
+    await expect(
+      searchWiki(shared, { query: "request routing" }),
+    ).resolves.toEqual({
+      status: "workspace_required",
+      wiki: { id: "shared", name: "shared" },
+      workspaces: [
+        { id: "payments", name: "Payments", wikiCount: 2 },
+        { id: "platform", name: "Platform", wikiCount: 2 },
+      ],
+    });
+
+    await setActiveWikiWorkspace(shared, "platform");
+    await expect(
+      searchWiki(shared, { query: "request routing" }),
+    ).resolves.toMatchObject({ workspace: { id: "platform" }, results: [] });
+    await expect(
+      searchWiki(shared, {
+        query: "request routing",
+        workspace: "Payments",
+      }),
+    ).resolves.toMatchObject({ workspace: { id: "payments" }, results: [] });
   });
 
   test("returns no search results when the repository has no wiki", async () => {

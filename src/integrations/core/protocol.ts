@@ -12,6 +12,8 @@ export type HostRunMode = "init" | "update";
  * The complete repository retrieval and generation MCP tool set.
  */
 export type ProtocolToolName =
+  | "openwiki_list_workspaces"
+  | "openwiki_list_wikis"
   | "openwiki_search"
   | "openwiki_read"
   | "openwiki_begin"

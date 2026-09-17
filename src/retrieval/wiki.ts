@@ -2,6 +2,12 @@ import { marked, type Token, type Tokens } from "marked";
 import { ClaimsStore } from "../claims/brains/code/store.js";
 import { normalizeWikiPagePath } from "../claims/brains/code/paths.js";
 import { parseFrontmatterFields } from "../okf/frontmatter.js";
+import {
+  resolveReadableWiki,
+  resolveWikiSearchScope,
+  type WikiWorkspaceRequired,
+  type WikiWorkspaceSummary,
+} from "../linking/wiki-workspaces.js";
 
 /**
  * Shared request and response bounds for repository wiki retrieval.
@@ -59,6 +65,16 @@ export const WIKI_RETRIEVAL_LIMITS = Object.freeze({
    * Maximum number of distinct terms retained from one query.
    */
   queryTerms: 64,
+
+  /**
+   * Maximum number of characters in one linked wiki identity.
+   */
+  wikiIdCharacters: 64,
+
+  /**
+   * Maximum number of characters in a workspace ID or display name.
+   */
+  workspaceReferenceCharacters: 80,
 });
 
 /**
@@ -94,6 +110,11 @@ export interface WikiSearchRequest {
    * Optional bounded result count.
    */
   limit?: number;
+
+  /**
+   * Optional explicit workspace ID or unique name overriding automatic scope.
+   */
+  workspace?: string;
 }
 
 /**
@@ -115,17 +136,56 @@ export interface WikiSearchResult {
    * Compact orientation text rather than the complete section body.
    */
   content: string;
+
+  /**
+   * Linked wiki identity to pass to `openwiki_read`.
+   *
+   * Omitted when the repository is not part of a linked wiki set.
+   */
+  wiki?: string;
 }
 
 /**
- * Model-free repository wiki search response.
+ * One wiki identity searched as part of a linked repository set.
  */
-export interface WikiSearchResponse {
+export interface WikiSearchIdentity {
+  /**
+   * Stable identity accepted by `openwiki_read`.
+   */
+  id: string;
+
+  /**
+   * Human-readable repository name.
+   */
+  name: string;
+}
+
+/**
+ * Successful model-free repository wiki search response.
+ */
+export interface WikiSearchResults {
   /**
    * Ranked compact results in descending relevance order.
    */
   results: WikiSearchResult[];
+
+  /**
+   * Selected named workspace, omitted for a standalone wiki.
+   */
+  workspace?: WikiWorkspaceSummary;
+
+  /**
+   * Complete linked wiki inventory searched by this call.
+   *
+   * Omitted for an ordinary unlinked repository.
+   */
+  wikis?: WikiSearchIdentity[];
 }
+
+/**
+ * Complete search response, including structured workspace ambiguity.
+ */
+export type WikiSearchResponse = WikiSearchResults | WikiWorkspaceRequired;
 
 /**
  * Exact section selection from one search result page.
@@ -140,6 +200,13 @@ export interface WikiReadRequest {
    * Exact heading anchors returned by search, in desired read order.
    */
   sections: readonly string[];
+
+  /**
+   * Linked wiki identity returned by search.
+   *
+   * Omitted to read the repository where retrieval began.
+   */
+  wiki?: string;
 }
 
 /**
@@ -170,6 +237,13 @@ export interface WikiReadResponse {
    * Complete selected sections in the caller's requested order.
    */
   sections: WikiReadSection[];
+
+  /**
+   * Linked wiki identity that supplied the page.
+   *
+   * Omitted when the repository is not linked.
+   */
+  wiki?: string;
 }
 
 /**
@@ -230,6 +304,11 @@ interface SearchUnit {
    * Compact relevant block shown before a full read.
    */
   excerpt: string;
+
+  /**
+   * Identity of the repository wiki that supplied this section.
+   */
+  wiki: string;
 }
 
 /**
@@ -373,19 +452,63 @@ export async function searchWiki(
       `Search accepts at most ${WIKI_RETRIEVAL_LIMITS.sourcePathHints} source path hints.`,
     );
   }
-  const terms = queryTerms(query);
-  if (!terms.length) return { results: [] };
-
-  const store = new ClaimsStore(root);
-  const units: SearchUnit[] = [];
-  for (const page of await store.discoverPages()) {
-    if (!isRetrievableWikiPage(page)) continue;
-    const markdown = await store.readMarkdown(page);
-    units.push(...searchUnits(markdown, page, terms));
+  if (
+    request.workspace !== undefined &&
+    (!request.workspace.trim() ||
+      request.workspace.length >
+        WIKI_RETRIEVAL_LIMITS.workspaceReferenceCharacters)
+  ) {
+    throw new WikiRetrievalError(
+      "Use a valid workspace ID or name returned by openwiki_list_workspaces.",
+    );
   }
-  if (!units.length) return { results: [] };
 
-  return rankSearchUnits(units, terms, paths, limit);
+  const scope = await resolveWikiSearchScope(root, request.workspace?.trim());
+  if (scope.status === "workspace_required") return scope;
+  const terms = queryTerms(query);
+  if (!terms.length) {
+    return scope.workspace
+      ? {
+          results: [],
+          workspace: scope.workspace,
+          wikis: scope.wikis.map(wikiIdentity),
+        }
+      : { results: [] };
+  }
+
+  const units: SearchUnit[] = [];
+  for (const wiki of scope.wikis) {
+    const store = new ClaimsStore(wiki.root);
+    for (const page of await store.discoverPages()) {
+      if (!isRetrievableWikiPage(page)) continue;
+      const markdown = await store.readMarkdown(page);
+      units.push(...searchUnits(markdown, page, terms, wiki.id));
+    }
+  }
+  if (!units.length) {
+    return scope.workspace
+      ? {
+          results: [],
+          workspace: scope.workspace,
+          wikis: scope.wikis.map(wikiIdentity),
+        }
+      : { results: [] };
+  }
+
+  const response = await rankSearchUnits(
+    units,
+    terms,
+    paths,
+    limit,
+    scope.workspace !== undefined,
+  );
+  return scope.workspace
+    ? {
+        ...response,
+        workspace: scope.workspace,
+        wikis: scope.wikis.map(wikiIdentity),
+      }
+    : response;
 }
 
 /**
@@ -398,6 +521,7 @@ export async function searchWiki(
  * @param terms - Normalized query terms.
  * @param paths - Normalized repository source hints.
  * @param limit - Maximum number of results to return.
+ * @param includeWiki - Whether public results need linked wiki identities.
  * @returns Ranked compact section results.
  */
 async function rankSearchUnits(
@@ -405,7 +529,8 @@ async function rankSearchUnits(
   terms: readonly string[],
   paths: readonly string[],
   limit: number,
-): Promise<WikiSearchResponse> {
+  includeWiki: boolean,
+): Promise<WikiSearchResults> {
   const { DatabaseSync } = await import("node:sqlite");
   const database = new DatabaseSync(":memory:");
   try {
@@ -459,7 +584,9 @@ async function rankSearchUnits(
     return {
       results: ranked
         .slice(0, limit)
-        .map(({ rowid }) => renderSearchResult(units[Number(rowid) - 1])),
+        .map(({ rowid }) =>
+          renderSearchResult(units[Number(rowid) - 1], includeWiki),
+        ),
     };
   } finally {
     database.close();
@@ -470,17 +597,23 @@ async function rankSearchUnits(
  * Renders one ranked unit as a compact progressive-disclosure result.
  *
  * @param unit - Ranked searchable section.
+ * @param includeWiki - Whether to expose the supplying linked wiki.
  * @returns Public search result containing a read-compatible reference.
  */
-function renderSearchResult(unit: SearchUnit): WikiSearchResult {
+function renderSearchResult(
+  unit: SearchUnit,
+  includeWiki: boolean,
+): WikiSearchResult {
   const heading = unit.heading ? `Section: ${unit.heading}` : "";
-  return {
+  const result: WikiSearchResult = {
     kind: "section",
     ref: [unit.ref],
     content: [unit.title, heading, unit.description, unit.excerpt]
       .filter(Boolean)
       .join("\n"),
   };
+  if (includeWiki) result.wiki = unit.wiki;
+  return result;
 }
 
 /**
@@ -504,9 +637,23 @@ export async function readWikiSections(
     );
   }
 
+  if (
+    request.wiki !== undefined &&
+    (!request.wiki.trim() ||
+      request.wiki.length > WIKI_RETRIEVAL_LIMITS.wikiIdCharacters)
+  ) {
+    throw new WikiRetrievalError(
+      "Use a valid linked wiki ID returned by search.",
+    );
+  }
+
+  const selectedWiki = await resolveReadableWiki(root, request.wiki?.trim());
+
   const normalizedPage = normalizeRetrievableWikiPage(request.page);
   const requested = request.sections.map(normalizeSectionAnchor);
-  const markdown = await new ClaimsStore(root).readMarkdown(normalizedPage);
+  const markdown = await new ClaimsStore(selectedWiki.root).readMarkdown(
+    normalizedPage,
+  );
   const body = markdownBody(markdown);
   const tokens = marked.lexer(body);
   const available = new Map(
@@ -519,13 +666,25 @@ export async function readWikiSections(
     );
   }
 
-  return {
+  const response: WikiReadResponse = {
     page: normalizedPage.slice(1),
     sections: requested.map((section) => ({
       section,
       content: available.get(section) as string,
     })),
   };
+  if (request.wiki !== undefined) response.wiki = selectedWiki.id;
+  return response;
+}
+
+/**
+ * Removes a validated repository root from one public search identity.
+ *
+ * @param wiki - Resolved repository wiki.
+ * @returns Client-facing stable ID and name.
+ */
+function wikiIdentity(wiki: WikiSearchIdentity): WikiSearchIdentity {
+  return { id: wiki.id, name: wiki.name };
 }
 
 /**
@@ -534,12 +693,14 @@ export async function readWikiSections(
  * @param markdown - Complete wiki page Markdown.
  * @param page - Canonical virtual page path.
  * @param terms - Normalized query terms used for excerpt selection.
+ * @param wiki - Identity of the repository wiki supplying the page.
  * @returns Searchable H2 sections, or a page-level H1 fallback.
  */
 function searchUnits(
   markdown: string,
   page: string,
   terms: readonly string[],
+  wiki: string,
 ): SearchUnit[] {
   const fields = parseFrontmatterFields(markdown) ?? {};
   if (fields.status === "deprecated") return [];
@@ -578,10 +739,10 @@ function searchUnits(
   };
 
   if (sections.length) {
-    return sections.map((section) => createSearchUnit(section, context));
+    return sections.map((section) => createSearchUnit(section, context, wiki));
   }
   if (firstH1) {
-    return [createSearchUnit({ ...firstH1, raw: body }, context)];
+    return [createSearchUnit({ ...firstH1, raw: body }, context, wiki)];
   }
   return [];
 }
@@ -591,11 +752,13 @@ function searchUnits(
  *
  * @param section - Parsed heading section.
  * @param context - Metadata and introductory prose shared by the page.
+ * @param wiki - Identity of the repository wiki supplying the section.
  * @returns Searchable section representation.
  */
 function createSearchUnit(
   section: ParsedHeadingSection,
   context: SearchPageContext,
+  wiki: string,
 ): SearchUnit {
   return {
     ref: `${context.relativePage}#${section.anchor}`,
@@ -606,6 +769,7 @@ function createSearchUnit(
     identifiers: context.identifiers,
     sourcePaths: context.sourcePaths,
     excerpt: relevantExcerpt(section.raw, context.terms),
+    wiki,
   };
 }
 

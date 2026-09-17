@@ -9,6 +9,11 @@ import {
   WIKI_RETRIEVAL_LIMITS,
   WikiRetrievalError,
 } from "../../retrieval/wiki.js";
+import {
+  listWikiWorkspaces,
+  listWorkspaceWikis,
+  WikiWorkspaceError,
+} from "../../linking/wiki-workspaces.js";
 import { HostIntegrationError } from "./errors.js";
 import type { ProtocolTool } from "./protocol.js";
 import { resolveRepositoryRoot } from "./repository-root.js";
@@ -43,6 +48,45 @@ export const SearchInput = z
       .max(WIKI_RETRIEVAL_LIMITS.searchResults)
       .optional()
       .describe("Optional number of ranked results to return."),
+    workspace: CanonicalString.max(
+      WIKI_RETRIEVAL_LIMITS.workspaceReferenceCharacters,
+    )
+      .optional()
+      .describe(
+        "Optional workspace ID or unique name overriding automatic workspace selection.",
+      ),
+  })
+  .strict();
+
+/**
+ * Strict schema for listing workspaces containing one wiki.
+ */
+export const ListWorkspacesInput = z
+  .object({
+    root: CanonicalString.describe(
+      "Absolute Git repository root containing openwiki/.",
+    ),
+    wiki: CanonicalString.max(WIKI_RETRIEVAL_LIMITS.wikiIdCharacters)
+      .optional()
+      .describe(
+        "Optional known wiki ID; omit to inspect the current repository.",
+      ),
+  })
+  .strict();
+
+/**
+ * Strict schema for listing member wikis in one workspace.
+ */
+export const ListWikisInput = z
+  .object({
+    root: CanonicalString.describe(
+      "Absolute Git repository root containing openwiki/.",
+    ),
+    workspace: CanonicalString.max(
+      WIKI_RETRIEVAL_LIMITS.workspaceReferenceCharacters,
+    ).describe(
+      "Workspace ID or unique name returned by openwiki_list_workspaces.",
+    ),
   })
   .strict();
 
@@ -62,6 +106,11 @@ export const ReadInput = z
       .min(1)
       .max(WIKI_RETRIEVAL_LIMITS.sectionAnchors)
       .describe('Heading anchors from search refs, e.g. ["retry-control"].'),
+    wiki: CanonicalString.max(WIKI_RETRIEVAL_LIMITS.wikiIdCharacters)
+      .optional()
+      .describe(
+        "Linked wiki ID from the selected search result; omit for the current repository.",
+      ),
   })
   .strict();
 
@@ -73,10 +122,43 @@ export const ReadInput = z
 export function createRetrievalTools(): ProtocolTool[] {
   return [
     {
+      name: "openwiki_list_workspaces",
+      description: [
+        "List named wiki workspaces containing one repository wiki.",
+        "Omit wiki to inspect the current repository; pass a known wiki ID to inspect another reachable wiki.",
+        "Returns the persistent active workspace when configured.",
+      ].join(" "),
+      schema: ListWorkspacesInput,
+      handle: async (input) => {
+        const request = ListWorkspacesInput.parse(input);
+        return runRetrieval("list", async () => {
+          const root = await resolveRepositoryRoot(request.root);
+          return listWikiWorkspaces(root, request.wiki);
+        });
+      },
+    },
+    {
+      name: "openwiki_list_wikis",
+      description: [
+        "List every repository wiki in one named workspace containing the current repository.",
+        "Pass a workspace ID or unique name returned by openwiki_list_workspaces.",
+      ].join(" "),
+      schema: ListWikisInput,
+      handle: async (input) => {
+        const request = ListWikisInput.parse(input);
+        return runRetrieval("list", async () => {
+          const root = await resolveRepositoryRoot(request.root);
+          return listWorkspaceWikis(root, request.workspace);
+        });
+      },
+    },
+    {
       name: "openwiki_search",
       description: [
         "Search an existing repository OpenWiki without a model call or generation run.",
-        "Returns compact ranked results as {results:[{kind,ref,content}]}; split each ref at # into the page and exact heading anchor for openwiki_read.",
+        "A standalone wiki searches locally; one containing workspace is automatic; an active workspace resolves overlaps.",
+        "When multiple workspaces remain ambiguous, returns status=workspace_required with choices so the agent can ask the user and retry with workspace.",
+        "Returns compact ranked results; split each ref at # into the page and exact heading anchor for openwiki_read.",
         "Optional source paths boost related sections but do not filter other matches.",
         "Empty results are valid.",
       ].join(" "),
@@ -93,7 +175,7 @@ export function createRetrievalTools(): ProtocolTool[] {
       name: "openwiki_read",
       description: [
         "Read one or more complete Markdown sections selected from openwiki_search refs.",
-        "Pass the ref's page and heading anchors exactly; sections are returned separately in request order.",
+        "Pass the result's wiki ID, page, and heading anchors exactly; omit wiki for an unlinked or current repository result.",
         "No model call or generation run is required.",
       ].join(" "),
       schema: ReadInput,
@@ -117,7 +199,7 @@ export function createRetrievalTools(): ProtocolTool[] {
  * @throws {HostIntegrationError} For expected input or repository-state errors.
  */
 async function runRetrieval<T>(
-  operation: "read" | "search",
+  operation: "list" | "read" | "search",
   task: () => Promise<T>,
 ): Promise<T> {
   try {
@@ -126,6 +208,9 @@ async function runRetrieval<T>(
     if (error instanceof HostIntegrationError) throw error;
     if (error instanceof WikiRetrievalError) {
       throw new HostIntegrationError("invalid_input", error.message);
+    }
+    if (error instanceof WikiWorkspaceError) {
+      throw new HostIntegrationError("invalid_state", error.message);
     }
     if (operation === "read" && error instanceof ClaimsPageMissingError) {
       throw new HostIntegrationError(

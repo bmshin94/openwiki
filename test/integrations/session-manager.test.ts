@@ -218,6 +218,8 @@ describe("HostSessionManager", () => {
         .tools()
         .map(({ name }) => name),
     ).toEqual([
+      "openwiki_list_workspaces",
+      "openwiki_list_wikis",
       "openwiki_search",
       "openwiki_read",
       "openwiki_begin",

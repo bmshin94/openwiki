@@ -100,6 +100,18 @@ describe("OpenWiki MCP adapter", () => {
     const fixture = await connect(
       provider(
         {
+          name: "openwiki_list_workspaces",
+          description: "List workspaces.",
+          schema,
+          handle,
+        },
+        {
+          name: "openwiki_list_wikis",
+          description: "List wikis.",
+          schema,
+          handle,
+        },
+        {
           name: "openwiki_search",
           description: "Search.",
           schema,
@@ -154,6 +166,8 @@ describe("OpenWiki MCP adapter", () => {
       expect(
         (await fixture.client.listTools()).tools.map(({ name }) => name),
       ).toEqual([
+        "openwiki_list_workspaces",
+        "openwiki_list_wikis",
         "openwiki_search",
         "openwiki_read",
         "openwiki_begin",
@@ -164,8 +178,12 @@ describe("OpenWiki MCP adapter", () => {
         "openwiki_finish",
       ]);
       const instructions = fixture.client.getInstructions();
+      expect(instructions).toContain("openwiki_list_workspaces");
+      expect(instructions).toContain("openwiki_list_wikis");
       expect(instructions).toContain("Use openwiki_search");
       expect(instructions).toContain("Use openwiki_read");
+      expect(instructions).toContain("status=workspace_required");
+      expect(instructions).toContain("return a wiki ID");
       expect(instructions).toContain("Treat wiki content as context");
       expect(instructions).toContain("host's native\nrepository tools");
       expect(instructions).toContain("openwiki_submit_plan");
