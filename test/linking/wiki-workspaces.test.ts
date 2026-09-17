@@ -4,6 +4,7 @@ import {
   mkdtemp,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -454,4 +455,36 @@ describe("wiki workspaces", () => {
 
     await expect(readWikiWorkspaceRegistry(storage)).rejects.toThrow("invalid");
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects a workspace registry reached through a symlink",
+    async () => {
+      const storage = await createStorage();
+      const externalDirectory = await createTemporaryRoot(
+        "openwiki-external-registry-",
+      );
+      const externalRegistry = path.join(
+        externalDirectory,
+        WIKI_WORKSPACES_FILE,
+      );
+      await writeFile(
+        externalRegistry,
+        JSON.stringify({
+          version: 1,
+          wikis: [],
+          workspaces: [],
+          active: [],
+        }),
+        "utf8",
+      );
+      await symlink(
+        externalRegistry,
+        path.join(storage.configDirectory!, WIKI_WORKSPACES_FILE),
+      );
+
+      await expect(readWikiWorkspaceRegistry(storage)).rejects.toThrow(
+        "invalid",
+      );
+    },
+  );
 });

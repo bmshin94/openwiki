@@ -488,27 +488,26 @@ export async function readWikiWorkspaceRegistry(
 async function readWorkspaceRegistryFile(
   registryPath: string,
 ): Promise<string | null> {
-  let inspectedStats: BigIntStats;
+  let fileHandle: Awaited<ReturnType<typeof open>>;
   try {
-    inspectedStats = await lstat(registryPath, { bigint: true });
+    fileHandle = await open(registryPath, workspaceRegistryOpenFlags());
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  if (
-    !inspectedStats.isFile() ||
-    inspectedStats.size > BigInt(MAX_REGISTRY_BYTES)
-  ) {
-    throw invalidRegistryError();
-  }
 
-  const fileHandle = await open(registryPath, workspaceRegistryOpenFlags());
   try {
     const openedStats = await fileHandle.stat({ bigint: true });
     if (
-      !isSameWorkspaceRegistryFile(inspectedStats, openedStats) ||
+      !openedStats.isFile() ||
       openedStats.size > BigInt(MAX_REGISTRY_BYTES)
     ) {
+      throw invalidRegistryError();
+    }
+    // Attest the pathname after acquiring the descriptor. A later path swap
+    // cannot redirect the descriptor-backed read below.
+    const pathStats = await lstat(registryPath, { bigint: true });
+    if (!isSameWorkspaceRegistryFile(pathStats, openedStats)) {
       throw invalidRegistryError();
     }
     const content = await fileHandle.readFile("utf8");
@@ -522,9 +521,9 @@ async function readWorkspaceRegistryFile(
 }
 
 /**
- * Verifies that an opened registry is the regular file inspected by path.
+ * Verifies that an opened registry is still represented by its regular path.
  *
- * @param inspectedStats - Non-following metadata captured before opening.
+ * @param inspectedStats - Non-following path metadata captured after opening.
  * @param openedStats - Metadata captured from the opened descriptor.
  * @returns Whether both observations identify the same regular file.
  */
@@ -532,7 +531,7 @@ function isSameWorkspaceRegistryFile(
   inspectedStats: BigIntStats,
   openedStats: BigIntStats,
 ): boolean {
-  if (!openedStats.isFile()) return false;
+  if (!inspectedStats.isFile() || !openedStats.isFile()) return false;
   if (process.platform !== "win32") {
     return (
       inspectedStats.dev === openedStats.dev &&
