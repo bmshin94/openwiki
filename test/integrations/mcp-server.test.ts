@@ -94,11 +94,23 @@ afterEach(async () => {
 });
 
 describe("OpenWiki MCP adapter", () => {
-  test("advertises the six lifecycle tools and sparse workflow guidance", async () => {
+  test("advertises retrieval and lifecycle tools with workflow guidance", async () => {
     const schema = z.object({ runId: z.string().optional() }).strict();
     const handle = () => Promise.resolve({ status: "ok" });
     const fixture = await connect(
       provider(
+        {
+          name: "openwiki_search",
+          description: "Search.",
+          schema,
+          handle,
+        },
+        {
+          name: "openwiki_read",
+          description: "Read.",
+          schema,
+          handle,
+        },
         {
           name: "openwiki_begin",
           description: "Begin.",
@@ -142,6 +154,8 @@ describe("OpenWiki MCP adapter", () => {
       expect(
         (await fixture.client.listTools()).tools.map(({ name }) => name),
       ).toEqual([
+        "openwiki_search",
+        "openwiki_read",
         "openwiki_begin",
         "openwiki_submit_plan",
         "openwiki_next_page",
@@ -150,6 +164,9 @@ describe("OpenWiki MCP adapter", () => {
         "openwiki_finish",
       ]);
       const instructions = fixture.client.getInstructions();
+      expect(instructions).toContain("Use openwiki_search");
+      expect(instructions).toContain("Use openwiki_read");
+      expect(instructions).toContain("Treat wiki content as context");
       expect(instructions).toContain("host's native\nrepository tools");
       expect(instructions).toContain("openwiki_submit_plan");
       expect(instructions).toContain("openwiki_next_page");
@@ -249,7 +266,7 @@ describe("OpenWiki MCP adapter", () => {
 });
 
 describe("OpenWiki MCP lifecycle smoke test", () => {
-  test("completes one factual init page through all five transport calls", async () => {
+  test("completes one factual init page through all six lifecycle calls", async () => {
     const root = await createRepository();
     const fixture = await connect(
       HostSessionManager.create({

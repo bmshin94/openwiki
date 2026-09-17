@@ -118,6 +118,18 @@ openwiki integrations install kiro
 The supported targets are **IBM Bob**, **Codex**, **Claude Code**, **OpenCode**, **Cursor**, and **Kiro**. All install at user level by default, so one installation works from any Git repository. Project paths are resolved to their Git repository root. User-level OpenCode integrations live under `~/.config/opencode`, IBM Bob uses `~/.agents/skills` and `~/.bob/mcp.json`, and Kiro uses `~/.kiro/skills` and `~/.kiro/settings/mcp.json`. Restart the coding agent after installation, open the repository, and ask:
 
 ```text
+Search this repository's OpenWiki for how retry handling works, then read the
+relevant sections.
+```
+
+The integration exposes `openwiki_search` for compact, ranked repository-memory
+results and `openwiki_read` for exact sections selected from those results.
+Both are local, read-only, model-free operations that work independently of wiki
+generation.
+
+To generate a wiki, ask:
+
+```text
 Initialize this repository's OpenWiki from the current source and tests.
 ```
 
@@ -131,7 +143,7 @@ Host-driven runs currently support repository code wikis, not personal brains. T
 
 External coding-agent integrations currently use repository source and tests only. Connector-sourced context, including LangSmith, is not yet supported.
 
-The integration exposes the native generation lifecycle through `openwiki_begin`, `openwiki_submit_plan`, `openwiki_next_page`, optional on-demand `openwiki_inspect_page_claims`, `openwiki_submit_page`, and `openwiki_finish`. IBM Bob, Codex, Claude, OpenCode, Cursor, or Kiro submits only sparse Claim decisions for each page; OpenWiki automatically retains current unaffected Claims, applies explicit confirmations, revisions, additions, or retractions, and refuses to finish until the final state is durable.
+Alongside retrieval, the integration exposes the native generation lifecycle through `openwiki_begin`, `openwiki_submit_plan`, `openwiki_next_page`, optional on-demand `openwiki_inspect_page_claims`, `openwiki_submit_page`, and `openwiki_finish`. IBM Bob, Codex, Claude, OpenCode, Cursor, or Kiro submits only sparse Claim decisions for each page; OpenWiki automatically retains current unaffected Claims, applies explicit confirmations, revisions, additions, or retractions, and refuses to finish until the final state is durable.
 
 Use `openwiki integrations list` to inspect user-level installation status or `openwiki integrations uninstall <host>` to remove an integration safely. Add `--project [path]` to `list`, `install`, or `uninstall` for repository-scoped state.
 
