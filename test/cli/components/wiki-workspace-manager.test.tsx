@@ -3,6 +3,7 @@ import { render } from "ink-testing-library";
 import { describe, expect, test, vi } from "vitest";
 import { WikiWorkspaceManager } from "../../../src/cli/components/wiki-workspace-manager.tsx";
 import { stripAnsi } from "./ansi.ts";
+import type { DiscoveredRepository } from "../../../src/linking/wiki-workspaces.ts";
 
 /**
  * Lets Ink attach or process one input listener.
@@ -29,17 +30,58 @@ async function moveDown(
   }
 }
 
+/**
+ * Creates a deterministic streaming repository finder for component tests.
+ *
+ * @param repositories - Repository rows yielded in order.
+ * @returns Finder factory accepted by the workspace manager.
+ */
+function repositoryFinder(
+  ...repositories: readonly DiscoveredRepository[]
+): (signal: AbortSignal) => AsyncIterable<DiscoveredRepository> {
+  /**
+   * Yields the supplied repository fixtures without filesystem access.
+   */
+  async function* findRepositories(
+    signal: AbortSignal,
+  ): AsyncGenerator<DiscoveredRepository> {
+    await Promise.resolve();
+    for (const repository of repositories) {
+      if (signal.aborted) return;
+      yield repository;
+    }
+  }
+
+  return findRepositories;
+}
+
 describe("WikiWorkspaceManager", () => {
   test("creates, names, selects, and finishes one workspace", async () => {
     const onSubmit = vi.fn();
     const view = render(
       <WikiWorkspaceManager
         initialWorkspaces={[]}
-        initialCandidates={[
-          { root: "/workspace/control", name: "control", path: "control" },
-          { root: "/workspace/data", name: "data", path: "data" },
-          { root: "/workspace/infra", name: "infra", path: "infra" },
-        ]}
+        finderRoot="/workspace"
+        findRepositories={repositoryFinder(
+          {
+            root: "/workspace/control",
+            name: "control",
+            path: "control",
+            hasOpenWiki: true,
+          },
+          {
+            root: "/workspace/data",
+            name: "data",
+            path: "data",
+            hasOpenWiki: true,
+          },
+          {
+            root: "/workspace/infra",
+            name: "infra",
+            path: "infra",
+            hasOpenWiki: true,
+          },
+        )}
         discoverLocation={vi.fn()}
         onSubmit={onSubmit}
         onCancel={vi.fn()}
@@ -87,7 +129,8 @@ describe("WikiWorkspaceManager", () => {
             roots: ["/workspace/control", "/workspace/data"],
           },
         ]}
-        initialCandidates={[]}
+        finderRoot="/workspace"
+        findRepositories={repositoryFinder()}
         discoverLocation={vi.fn()}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
@@ -125,7 +168,8 @@ describe("WikiWorkspaceManager", () => {
             roots: ["/workspace/control", "/workspace/data"],
           },
         ]}
-        initialCandidates={[]}
+        finderRoot="/workspace"
+        findRepositories={repositoryFinder()}
         discoverLocation={discoverLocation}
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
@@ -148,6 +192,62 @@ describe("WikiWorkspaceManager", () => {
 
     expect(discoverLocation).toHaveBeenCalledWith("/elsewhere/infra");
     expect(stripAnsi(view.lastFrame())).toContain("[x] infra");
+    view.unmount();
+  });
+
+  test("pins selections while filtering and prevents unavailable selection", async () => {
+    const view = render(
+      <WikiWorkspaceManager
+        initialWorkspaces={[
+          {
+            id: "payments",
+            name: "Payments",
+            roots: ["/workspace/control", "/workspace/data"],
+          },
+        ]}
+        finderRoot="/workspace"
+        findRepositories={repositoryFinder(
+          {
+            root: "/workspace/openwiki",
+            name: "openwiki",
+            path: "openwiki",
+            hasOpenWiki: true,
+          },
+          {
+            root: "/workspace/ordinary",
+            name: "ordinary",
+            path: "ordinary",
+            hasOpenWiki: false,
+          },
+        )}
+        discoverLocation={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    await flush();
+    await flush();
+
+    view.stdin.write("\r");
+    await flush();
+    view.stdin.write("\r");
+    await flush();
+    view.stdin.write("ordinary");
+    await flush();
+
+    const filtered = stripAnsi(view.lastFrame());
+    expect(filtered).toContain("Selected repositories");
+    expect(filtered).toContain("[x] control");
+    expect(filtered).toContain("[x] data");
+    expect(filtered).toContain("ordinary");
+    expect(filtered).not.toContain("openwiki");
+
+    view.stdin.write(" ");
+    await flush();
+    expect(stripAnsi(view.lastFrame())).toContain(
+      "This repository does not contain OpenWiki documentation.",
+    );
+    expect(stripAnsi(view.lastFrame())).not.toContain("[x] ordinary");
     view.unmount();
   });
 });

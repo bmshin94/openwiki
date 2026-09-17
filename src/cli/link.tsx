@@ -4,12 +4,15 @@ import { render } from "ink";
 import { resolveRepositoryRoot } from "../integrations/core/repository-root.js";
 import {
   clearActiveWikiWorkspace,
+  discoverRepositories,
   discoverWikiLocation,
   listWikiWorkspaces,
   readWikiWorkspaceRegistry,
+  resolveRepositoryFinderRoot,
   saveWikiWorkspaces,
   setActiveWikiWorkspace,
   workspaceDrafts,
+  type DiscoveredRepository,
   type DiscoveredWiki,
   type WikiWorkspaceDraft,
 } from "../linking/wiki-workspaces.js";
@@ -20,7 +23,7 @@ import { WikiWorkspaceManager } from "./components/wiki-workspace-manager.js";
 /**
  * Runs the interactive named wiki-workspace manager.
  *
- * @param command - Parsed initial discovery location.
+ * @param command - Parsed initial repository-finder location.
  */
 export async function runLinkCommand(
   command: Extract<CliCommand, { kind: "link" }>,
@@ -31,14 +34,15 @@ export async function runLinkCommand(
     }
 
     const baseDirectory = process.cwd();
-    const initialCandidates = await discoverWikiLocation(
+    const finderRoot = await resolveRepositoryFinderRoot(
       command.directory,
       baseDirectory,
     );
     const registry = await readWikiWorkspaceRegistry();
     const result = await manageWikiWorkspaces(
       workspaceDrafts(registry),
-      initialCandidates,
+      finderRoot,
+      (signal) => discoverRepositories(finderRoot, signal),
       (location) => discoverWikiLocation(location, baseDirectory),
     );
     if (!result) {
@@ -91,20 +95,25 @@ export async function runWorkspaceCommand(
  * Renders the manager and resolves after Finish or Ctrl-C.
  *
  * @param initialWorkspaces - Complete initial workspace collection.
- * @param initialCandidates - Wikis found below the initial location.
+ * @param finderRoot - Canonical directory searched for repositories.
+ * @param findRepositories - Creates the streaming repository scan.
  * @param discoverLocation - Additional location resolver.
  * @returns Final collection or `null` after cancellation.
  */
 async function manageWikiWorkspaces(
   initialWorkspaces: readonly WikiWorkspaceDraft[],
-  initialCandidates: readonly DiscoveredWiki[],
+  finderRoot: string,
+  findRepositories: (
+    signal: AbortSignal,
+  ) => AsyncIterable<DiscoveredRepository>,
   discoverLocation: (location: string) => Promise<DiscoveredWiki[]>,
 ): Promise<WikiWorkspaceDraft[] | null> {
   let result: WikiWorkspaceDraft[] | null = null;
   const instance = render(
     <WikiWorkspaceManager
       initialWorkspaces={initialWorkspaces}
-      initialCandidates={initialCandidates}
+      finderRoot={finderRoot}
+      findRepositories={findRepositories}
       discoverLocation={discoverLocation}
       onSubmit={(workspaces) => {
         result = workspaces;

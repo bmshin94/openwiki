@@ -142,11 +142,14 @@ From an OpenWiki source checkout, run the same command as
 `pnpm run dev link ~/dev`.
 
 Create a workspace such as `Payments`, then select its control-plane, data-plane,
-infrastructure, or other repository wikis. A repository can belong to more than
-one workspace. Choose **Add repository or directory** to include a direct path,
-a path inside a repository, or another directory to scan; repositories do not
-need to share a parent directory. The registry is stored privately under
-`~/.openwiki` (or `OPENWIKI_CONFIG_DIR`).
+infrastructure, or other repositories. The finder streams Git repositories below
+the starting directory and fuzzy-filters them as you type. Repositories containing
+OpenWiki documentation are bright and selectable; other repositories are dimmed.
+Selections remain pinned above the changing search results, and a repository can
+belong to more than one workspace. Choose **Add repository path** to include a
+repository elsewhere or a path inside it. Repositories do not need to share a
+parent directory. The registry is stored privately under `~/.openwiki` (or
+`OPENWIKI_CONFIG_DIR`).
 
 Search chooses its scope predictably:
 

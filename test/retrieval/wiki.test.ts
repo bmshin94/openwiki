@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { UPDATE_METADATA_PATH } from "../../src/config/constants.ts";
 import {
   readWikiSections,
   searchWiki,
@@ -79,6 +80,7 @@ async function createLinkedRoot(
     `# ${name} quickstart\n`,
     "utf8",
   );
+  await writeFile(path.join(root, UPDATE_METADATA_PATH), "{}\n", "utf8");
   return root;
 }
 

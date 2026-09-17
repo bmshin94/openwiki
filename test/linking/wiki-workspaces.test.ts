@@ -9,11 +9,12 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import { UPDATE_METADATA_PATH } from "../../src/config/constants.ts";
 import {
   WIKI_WORKSPACES_FILE,
   clearActiveWikiWorkspace,
+  discoverRepositories,
   discoverWikiLocation,
-  discoverWikiRepositories,
   listWikiWorkspaces,
   listWorkspaceWikis,
   readWikiWorkspaceRegistry,
@@ -22,6 +23,7 @@ import {
   setActiveWikiWorkspace,
   workspaceDrafts,
   type WikiWorkspaceStorageOptions,
+  type DiscoveredRepository,
 } from "../../src/linking/wiki-workspaces.ts";
 
 /**
@@ -60,6 +62,7 @@ async function createWikiRepository(
     `# ${relativePath}\n`,
     "utf8",
   );
+  await writeFile(path.join(root, UPDATE_METADATA_PATH), "{}\n", "utf8");
   return root;
 }
 
@@ -72,6 +75,20 @@ async function createStorage(): Promise<WikiWorkspaceStorageOptions> {
   return { configDirectory: await createTemporaryRoot("openwiki-config-") };
 }
 
+/**
+ * Collects streamed repository discovery for deterministic assertions.
+ *
+ * @param repositories - Streaming discovery result.
+ * @returns Repositories in discovery order.
+ */
+async function collectRepositories(
+  repositories: AsyncIterable<DiscoveredRepository>,
+): Promise<DiscoveredRepository[]> {
+  const collected: DiscoveredRepository[] = [];
+  for await (const repository of repositories) collected.push(repository);
+  return collected;
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots
@@ -81,19 +98,48 @@ afterEach(async () => {
 });
 
 describe("wiki workspaces", () => {
-  test("discovers descendant repositories and resolves a direct nested path", async () => {
+  test("streams all repositories and directly resolves an OpenWiki path", async () => {
     const directory = await createTemporaryRoot("openwiki-discovery-");
     const control = await createWikiRepository(directory, "control-plane");
+    const openwiki = await createWikiRepository(directory, "openwiki");
     await createWikiRepository(directory, "services/data-plane");
     await createWikiRepository(directory, "node_modules/not-a-service");
+    const quickstartOnly = path.join(directory, "quickstart-only");
+    await mkdir(path.join(quickstartOnly, ".git"), { recursive: true });
+    await mkdir(path.join(quickstartOnly, "openwiki"), { recursive: true });
+    await writeFile(
+      path.join(quickstartOnly, "openwiki", "quickstart.md"),
+      "# Not initialized\n",
+      "utf8",
+    );
     await mkdir(path.join(control, "src/nested"), { recursive: true });
 
-    await expect(discoverWikiRepositories(directory)).resolves.toEqual([
-      { root: control, name: "control-plane", path: "control-plane" },
+    await expect(
+      collectRepositories(discoverRepositories(directory)),
+    ).resolves.toEqual([
+      {
+        root: control,
+        name: "control-plane",
+        path: "control-plane",
+        hasOpenWiki: true,
+      },
+      {
+        root: openwiki,
+        name: "openwiki",
+        path: "openwiki",
+        hasOpenWiki: true,
+      },
+      {
+        root: quickstartOnly,
+        name: "quickstart-only",
+        path: "quickstart-only",
+        hasOpenWiki: false,
+      },
       {
         root: path.join(directory, "services/data-plane"),
         name: "data-plane",
         path: "services/data-plane",
+        hasOpenWiki: true,
       },
     ]);
     await expect(

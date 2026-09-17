@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import type {
+  DiscoveredRepository,
   DiscoveredWiki,
   WikiWorkspaceDraft,
 } from "../../linking/wiki-workspaces.js";
+
+/**
+ * Maximum filtered repository rows rendered at once.
+ */
+const MAX_VISIBLE_REPOSITORIES = 14;
 
 /**
  * Properties accepted by the interactive wiki-workspace manager.
@@ -16,12 +22,19 @@ export interface WikiWorkspaceManagerProps {
   initialWorkspaces: readonly WikiWorkspaceDraft[];
 
   /**
-   * Repository wikis found below the initial discovery directory.
+   * Canonical directory shown as the repository-finder scope.
    */
-  initialCandidates: readonly DiscoveredWiki[];
+  finderRoot: string;
 
   /**
-   * Resolves an additional direct repository or directory location.
+   * Creates one streaming scan of Git repositories below the finder root.
+   */
+  findRepositories: (
+    signal: AbortSignal,
+  ) => AsyncIterable<DiscoveredRepository>;
+
+  /**
+   * Resolves an additional direct repository or nested path.
    */
   discoverLocation: (location: string) => Promise<DiscoveredWiki[]>;
 
@@ -122,7 +135,7 @@ interface WorkspaceNameScreen {
 }
 
 /**
- * Additional repository or directory text-entry screen.
+ * Additional direct repository-path text-entry screen.
  */
 interface WorkspaceLocationScreen {
   /**
@@ -154,12 +167,27 @@ interface EditorRow {
   /**
    * Row behavior discriminator.
    */
-  kind: "candidate" | "add" | "save" | "back";
+  kind: "selected" | "repository" | "path" | "save" | "back";
 
   /**
-   * Repository candidate associated with a candidate row.
+   * Repository associated with a selected or finder row.
    */
-  candidate?: DiscoveredWiki;
+  repository?: DiscoveredRepository;
+}
+
+/**
+ * Editor row paired with its cursor index before visual grouping.
+ */
+interface IndexedEditorRow {
+  /**
+   * Repository or action row.
+   */
+  row: EditorRow;
+
+  /**
+   * Stable position in the complete navigable row collection.
+   */
+  index: number;
 }
 
 /**
@@ -170,7 +198,8 @@ interface EditorRow {
  */
 export function WikiWorkspaceManager({
   initialWorkspaces,
-  initialCandidates,
+  finderRoot,
+  findRepositories,
   discoverLocation,
   onSubmit,
   onCancel,
@@ -183,8 +212,8 @@ export function WikiWorkspaceManager({
       key: workspace.id ?? temporaryWorkspaceKey(),
     })),
   );
-  const [candidates, setCandidates] = useState<DiscoveredWiki[]>(() =>
-    mergeCandidates(initialCandidates, workspaceCandidates(initialWorkspaces)),
+  const [repositories, setRepositories] = useState<DiscoveredRepository[]>(() =>
+    workspaceRepositories(initialWorkspaces),
   );
   const [screen, setScreen] = useState<ManagerScreen>({ kind: "workspaces" });
   const [cursor, setCursor] = useState(0);
@@ -192,23 +221,51 @@ export function WikiWorkspaceManager({
   const [editRoots, setEditRoots] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(true);
 
   const selectedWorkspace =
     "workspaceKey" in screen
       ? workspaces.find((workspace) => workspace.key === screen.workspaceKey)
       : undefined;
   const editorRows = useMemo<EditorRow[]>(
-    () => [
-      ...candidates.map((candidate) => ({
-        kind: "candidate" as const,
-        candidate,
-      })),
-      { kind: "add" },
-      { kind: "save" },
-      { kind: "back" },
-    ],
-    [candidates],
+    () => createEditorRows(repositories, editRoots, input),
+    [editRoots, input, repositories],
   );
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+
+    /**
+     * Consumes repository discovery incrementally without delaying first render.
+     */
+    async function scanRepositories(): Promise<void> {
+      try {
+        for await (const repository of findRepositories(controller.signal)) {
+          if (!active) return;
+          setRepositories((current) =>
+            mergeRepositories(current, [repository]),
+          );
+        }
+      } catch (error) {
+        if (active) {
+          setMessage(
+            error instanceof Error
+              ? error.message
+              : "Unable to search for repositories.",
+          );
+        }
+      } finally {
+        if (active) setScanning(false);
+      }
+    }
+
+    void scanRepositories();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [findRepositories]);
 
   /**
    * Returns to a screen with reset navigation feedback.
@@ -275,13 +332,13 @@ export function WikiWorkspaceManager({
   }
 
   /**
-   * Resolves and adds candidates from the current location input.
+   * Resolves and selects a direct repository path from the current input.
    */
   async function submitLocation(): Promise<void> {
     if (screen.kind !== "location" || busy) return;
     const location = input.trim();
     if (!location) {
-      setMessage("Enter a repository or directory path.");
+      setMessage("Enter a repository path.");
       return;
     }
     setBusy(true);
@@ -289,10 +346,18 @@ export function WikiWorkspaceManager({
     try {
       const found = await discoverLocation(location);
       if (found.length === 0) {
-        setMessage("No repository wikis were found at that location.");
+        setMessage("No OpenWiki repository was found at that location.");
         return;
       }
-      setCandidates((current) => mergeCandidates(current, found));
+      setRepositories((current) =>
+        mergeRepositories(
+          current,
+          found.map((repository) => ({
+            ...repository,
+            hasOpenWiki: true,
+          })),
+        ),
+      );
       if (found.length === 1) {
         setEditRoots((current) => new Set([...current, found[0].root]));
       }
@@ -300,7 +365,7 @@ export function WikiWorkspaceManager({
       setMessage(
         found.length === 1
           ? `Added ${found[0].name}.`
-          : `Found ${found.length} wikis. Select the ones to include.`,
+          : `Added ${found.length} repositories.`,
       );
     } catch (error) {
       setMessage(
@@ -311,6 +376,22 @@ export function WikiWorkspaceManager({
     } finally {
       setBusy(false);
     }
+  }
+
+  /**
+   * Toggles a selectable repository row or explains why it is unavailable.
+   *
+   * @param row - Active selected or finder row.
+   */
+  function chooseRepository(row: EditorRow | undefined): void {
+    if (!row?.repository) return;
+    if (row.kind === "repository" && !row.repository.hasOpenWiki) {
+      setMessage("This repository does not contain OpenWiki documentation.");
+      return;
+    }
+    if (row.kind !== "selected" && row.kind !== "repository") return;
+    setEditRoots((current) => toggleSelection(current, row.repository!.root));
+    setMessage(null);
   }
 
   useInput((inputValue, key) => {
@@ -353,26 +434,43 @@ export function WikiWorkspaceManager({
     }
 
     const rowCount = managerRowCount(screen, workspaces, editorRows);
-    if (key.upArrow || inputValue === "k") {
+    if (key.upArrow || (screen.kind !== "edit" && inputValue === "k")) {
       setCursor((current) => wrapIndex(current - 1, rowCount));
       setMessage(null);
       return;
     }
-    if (key.downArrow || inputValue === "j") {
+    if (key.downArrow || (screen.kind !== "edit" && inputValue === "j")) {
       setCursor((current) => wrapIndex(current + 1, rowCount));
       setMessage(null);
       return;
     }
 
-    if (screen.kind === "edit" && inputValue === " ") {
-      const row = editorRows[cursor];
-      if (row?.kind === "candidate" && row.candidate) {
-        setEditRoots((current) =>
-          toggleSelection(current, row.candidate!.root),
-        );
+    if (screen.kind === "edit") {
+      if (key.escape && input) {
+        setInput("");
+        setCursor(0);
         setMessage(null);
+        return;
       }
-      return;
+      if (key.backspace || key.delete) {
+        setInput((current) => current.slice(0, -1));
+        setCursor(editRoots.size);
+        setMessage(null);
+        return;
+      }
+      if (inputValue === " ") {
+        chooseRepository(editorRows[cursor]);
+        return;
+      }
+      if (!key.return && !key.ctrl && !key.meta) {
+        const printable = printableInput(inputValue);
+        if (printable) {
+          setInput((current) => `${current}${printable}`.slice(0, 2_000));
+          setCursor(editRoots.size);
+          setMessage(null);
+        }
+        return;
+      }
     }
     if (!key.return) return;
 
@@ -421,15 +519,15 @@ export function WikiWorkspaceManager({
     }
     if (screen.kind === "edit") {
       const row = editorRows[cursor];
-      if (row?.kind === "candidate" && row.candidate) {
-        setEditRoots((current) =>
-          toggleSelection(current, row.candidate!.root),
-        );
-      } else if (row?.kind === "add") {
+      if (row?.kind === "selected" || row?.kind === "repository") {
+        chooseRepository(row);
+      } else if (row?.kind === "path") {
         navigate({ kind: "location", workspaceKey: selectedWorkspace.key });
       } else if (row?.kind === "save") {
         if (editRoots.size < 2) {
-          setMessage("Select at least two repository wikis.");
+          setMessage(
+            "Select at least two repositories with OpenWiki documentation.",
+          );
           return;
         }
         setWorkspaces((current) =>
@@ -468,8 +566,10 @@ export function WikiWorkspaceManager({
         <WorkspaceEditor
           workspace={selectedWorkspace}
           rows={editorRows}
-          selectedRoots={editRoots}
           cursor={cursor}
+          filter={input}
+          finderRoot={finderRoot}
+          scanning={scanning}
         />
       ) : null}
       {screen.kind === "delete" && selectedWorkspace ? (
@@ -484,11 +584,7 @@ export function WikiWorkspaceManager({
         />
       ) : null}
       {screen.kind === "location" ? (
-        <TextEntry
-          label="Repository or directory path"
-          value={input}
-          busy={busy}
-        />
+        <TextEntry label="Repository path" value={input} busy={busy} />
       ) : null}
       {message ? <Text color="yellow">{message}</Text> : null}
       <Box marginTop={1}>
@@ -590,14 +686,24 @@ interface WorkspaceEditorProps {
   rows: readonly EditorRow[];
 
   /**
-   * Canonical repository roots currently selected.
-   */
-  selectedRoots: ReadonlySet<string>;
-
-  /**
-   * Selected editor row.
+   * Selected row index across pinned, finder, and action rows.
    */
   cursor: number;
+
+  /**
+   * Current fuzzy repository filter.
+   */
+  filter: string;
+
+  /**
+   * Canonical root searched by the repository finder.
+   */
+  finderRoot: string;
+
+  /**
+   * Whether repository discovery is still producing results.
+   */
+  scanning: boolean;
 }
 
 /**
@@ -609,31 +715,115 @@ interface WorkspaceEditorProps {
 function WorkspaceEditor({
   workspace,
   rows,
-  selectedRoots,
   cursor,
+  filter,
+  finderRoot,
+  scanning,
 }: WorkspaceEditorProps): React.JSX.Element {
+  const indexedRows = rows.map((row, index) => ({ row, index }));
+  const selectedRows = indexedRows.filter(({ row }) => row.kind === "selected");
+  const repositoryRows = indexedRows.filter(
+    ({ row }) => row.kind === "repository",
+  );
+  const visibleRepositories = repositoryWindow(repositoryRows, cursor);
+  const actionRows = indexedRows.filter(
+    ({ row }) =>
+      row.kind === "path" || row.kind === "save" || row.kind === "back",
+  );
+
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text>{workspace.name}</Text>
-      <Text dimColor>Select the wikis that should be searched together.</Text>
+      <Text dimColor>
+        Select repositories whose OpenWiki documentation should be searched
+        together.
+      </Text>
       <Box flexDirection="column" marginTop={1}>
-        {rows.map((row, index) => {
-          if (row.kind === "candidate" && row.candidate) {
-            return (
-              <MenuText key={row.candidate.root} active={cursor === index}>
-                [{selectedRoots.has(row.candidate.root) ? "x" : " "}]{" "}
-                {row.candidate.name} <Text dimColor>{row.candidate.path}</Text>
-              </MenuText>
-            );
-          }
-          return (
+        <Text>Selected repositories</Text>
+        {selectedRows.length === 0 ? (
+          <Text dimColor> None selected</Text>
+        ) : null}
+        {selectedRows.map(({ row, index }) => (
+          <RepositoryMenuRow
+            key={`selected:${row.repository!.root}`}
+            repository={row.repository!}
+            active={cursor === index}
+            selected
+          />
+        ))}
+        <Box flexDirection="column" marginTop={1}>
+          <Text>Find repositories</Text>
+          <Text dimColor>{finderRoot}</Text>
+          <Text color="cyan">Filter: {filter}_</Text>
+          {visibleRepositories.map(({ row, index }) => (
+            <RepositoryMenuRow
+              key={`repository:${row.repository!.root}`}
+              repository={row.repository!}
+              active={cursor === index}
+              selected={false}
+            />
+          ))}
+          {repositoryRows.length === 0 ? (
+            <Text dimColor>
+              {scanning ? "Searching…" : "No repositories match."}
+            </Text>
+          ) : null}
+          {scanning && repositoryRows.length > 0 ? (
+            <Text dimColor>Searching…</Text>
+          ) : null}
+        </Box>
+        <Box flexDirection="column" marginTop={1}>
+          {actionRows.map(({ row, index }) => (
             <MenuText key={row.kind} active={cursor === index}>
               {editorActionLabel(row.kind)}
             </MenuText>
-          );
-        })}
+          ))}
+        </Box>
       </Box>
     </Box>
+  );
+}
+
+/**
+ * Properties accepted by one repository finder or selected row.
+ */
+interface RepositoryMenuRowProps {
+  /**
+   * Repository displayed by the row.
+   */
+  repository: DiscoveredRepository;
+
+  /**
+   * Whether the row owns the keyboard cursor.
+   */
+  active: boolean;
+
+  /**
+   * Whether the repository is already selected.
+   */
+  selected: boolean;
+}
+
+/**
+ * Renders one repository with selection and linkability conveyed unobtrusively.
+ *
+ * @param props - Repository, cursor, and selection state.
+ * @returns One consistently styled repository row.
+ */
+function RepositoryMenuRow({
+  repository,
+  active,
+  selected,
+}: RepositoryMenuRowProps): React.JSX.Element {
+  const selectable = selected || repository.hasOpenWiki;
+  return (
+    <MenuText active={active} dimmed={!selectable}>
+      {selectable ? `[${selected ? "x" : " "}] ` : "    "}
+      {repository.name}
+      {repository.path === repository.name ? null : (
+        <Text dimColor> {repository.path}</Text>
+      )}
+    </MenuText>
   );
 }
 
@@ -665,7 +855,9 @@ function DeleteConfirmation({
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text>Delete {workspace.name}?</Text>
-      <Text dimColor>The repository wikis themselves are not changed.</Text>
+      <Text dimColor>
+        The repositories and their documentation are not changed.
+      </Text>
       <MenuText active={cursor === 0}>Delete workspace</MenuText>
       <MenuText active={cursor === 1}>Cancel</MenuText>
     </Box>
@@ -724,6 +916,11 @@ interface MenuTextProps {
   active: boolean;
 
   /**
+   * Whether the row should remain visually subdued.
+   */
+  dimmed?: boolean;
+
+  /**
    * Row content.
    */
   children: React.ReactNode;
@@ -735,9 +932,13 @@ interface MenuTextProps {
  * @param props - Active state and row content.
  * @returns Ink menu row.
  */
-function MenuText({ active, children }: MenuTextProps): React.JSX.Element {
+function MenuText({
+  active,
+  dimmed = false,
+  children,
+}: MenuTextProps): React.JSX.Element {
   return (
-    <Text color={active ? "cyan" : undefined}>
+    <Text color={active ? "cyan" : undefined} dimColor={dimmed}>
       {active ? "›" : " "} {children}
     </Text>
   );
@@ -758,36 +959,43 @@ function managerDraft(workspace: ManagedWorkspace): WikiWorkspaceDraft {
 }
 
 /**
- * Creates candidates for persisted roots outside initial discovery.
+ * Creates selectable repository entries for persisted workspace roots.
  *
  * @param workspaces - Persisted workspace drafts.
- * @returns Candidate rows for every referenced root.
+ * @returns Repository entries for every referenced root.
  */
-function workspaceCandidates(
+function workspaceRepositories(
   workspaces: readonly WikiWorkspaceDraft[],
-): DiscoveredWiki[] {
-  return workspaces.flatMap((workspace) =>
-    workspace.roots.map((root) => ({
-      root,
-      name: root.split(/[\\/]/u).at(-1) ?? root,
-      path: root,
-    })),
+): DiscoveredRepository[] {
+  return mergeRepositories(
+    workspaces.flatMap((workspace) =>
+      workspace.roots.map((root) => ({
+        root,
+        name: root.split(/[\\/]/u).at(-1) ?? root,
+        path: root,
+        hasOpenWiki: true,
+      })),
+    ),
   );
 }
 
 /**
- * Deduplicates candidate roots while preserving first-seen display metadata.
+ * Deduplicates repository roots and preserves positive OpenWiki detection.
  *
  * @param collections - Candidate collections to merge.
- * @returns Deterministically ordered unique candidates.
+ * @returns Deterministically ordered unique repositories.
  */
-function mergeCandidates(
-  ...collections: readonly (readonly DiscoveredWiki[])[]
-): DiscoveredWiki[] {
-  const byRoot = new Map<string, DiscoveredWiki>();
+function mergeRepositories(
+  ...collections: readonly (readonly DiscoveredRepository[])[]
+): DiscoveredRepository[] {
+  const byRoot = new Map<string, DiscoveredRepository>();
   for (const collection of collections) {
-    for (const candidate of collection) {
-      if (!byRoot.has(candidate.root)) byRoot.set(candidate.root, candidate);
+    for (const repository of collection) {
+      const existing = byRoot.get(repository.root);
+      byRoot.set(repository.root, {
+        ...repository,
+        hasOpenWiki: repository.hasOpenWiki || existing?.hasOpenWiki === true,
+      });
     }
   }
   return [...byRoot.values()].sort(
@@ -795,6 +1003,148 @@ function mergeCandidates(
       left.name.localeCompare(right.name) ||
       left.root.localeCompare(right.root),
   );
+}
+
+/**
+ * Builds pinned selections, ranked finder matches, and editor actions.
+ *
+ * @param repositories - Complete streamed and persisted repository collection.
+ * @param selectedRoots - Canonical roots selected for the workspace draft.
+ * @param filter - User-entered fuzzy repository filter.
+ * @returns Complete navigable editor row collection.
+ */
+function createEditorRows(
+  repositories: readonly DiscoveredRepository[],
+  selectedRoots: ReadonlySet<string>,
+  filter: string,
+): EditorRow[] {
+  const byRoot = new Map(
+    repositories.map((repository) => [repository.root, repository]),
+  );
+  const selected = [...selectedRoots]
+    .map(
+      (root): DiscoveredRepository =>
+        byRoot.get(root) ?? {
+          root,
+          name: root.split(/[\\/]/u).at(-1) ?? root,
+          path: root,
+          hasOpenWiki: true,
+        },
+    )
+    .sort(compareRepositories);
+  const matches = rankRepositories(
+    repositories.filter((repository) => !selectedRoots.has(repository.root)),
+    filter,
+  );
+  return [
+    ...selected.map((repository) => ({
+      kind: "selected" as const,
+      repository,
+    })),
+    ...matches.map((repository) => ({
+      kind: "repository" as const,
+      repository,
+    })),
+    { kind: "path" },
+    { kind: "save" },
+    { kind: "back" },
+  ];
+}
+
+/**
+ * Ranks repository names and display paths by a linear fuzzy match.
+ *
+ * @param repositories - Unselected repositories available to search.
+ * @param filter - User-entered fuzzy query.
+ * @returns Matching repositories ordered by relevance then name and path.
+ */
+function rankRepositories(
+  repositories: readonly DiscoveredRepository[],
+  filter: string,
+): DiscoveredRepository[] {
+  const query = filter.trim().toLocaleLowerCase();
+  if (!query) return [...repositories].sort(compareRepositories);
+  return repositories
+    .map((repository) => ({
+      repository,
+      score: fuzzyMatchScore(
+        `${repository.name} ${repository.path}`.toLocaleLowerCase(),
+        query,
+      ),
+    }))
+    .filter(
+      (match): match is { repository: DiscoveredRepository; score: number } =>
+        match.score !== null,
+    )
+    .sort(
+      (left, right) =>
+        left.score - right.score ||
+        compareRepositories(left.repository, right.repository),
+    )
+    .map(({ repository }) => repository);
+}
+
+/**
+ * Scores an ordered character-subsequence match without regular expressions.
+ *
+ * Consecutive characters and matches near the beginning receive lower scores.
+ *
+ * @param value - Normalized repository name and display path.
+ * @param query - Normalized non-empty filter text.
+ * @returns Match score, or `null` when the query is not a subsequence.
+ */
+function fuzzyMatchScore(value: string, query: string): number | null {
+  let previousIndex = -1;
+  let score = 0;
+  for (const character of query) {
+    const index = value.indexOf(character, previousIndex + 1);
+    if (index === -1) return null;
+    score += index - previousIndex - 1;
+    previousIndex = index;
+  }
+  return score + previousIndex / Math.max(value.length, 1);
+}
+
+/**
+ * Compares repositories deterministically by name and canonical root.
+ *
+ * @param left - First repository.
+ * @param right - Second repository.
+ * @returns Negative, zero, or positive sort result.
+ */
+function compareRepositories(
+  left: DiscoveredRepository,
+  right: DiscoveredRepository,
+): number {
+  return (
+    left.name.localeCompare(right.name) || left.root.localeCompare(right.root)
+  );
+}
+
+/**
+ * Selects a cursor-aware window of repository matches for terminal rendering.
+ *
+ * @param repositories - Indexed filtered repository rows.
+ * @param cursor - Active index in the complete editor row collection.
+ * @returns At most the configured number of visible repository rows.
+ */
+function repositoryWindow(
+  repositories: readonly IndexedEditorRow[],
+  cursor: number,
+): IndexedEditorRow[] {
+  if (repositories.length <= MAX_VISIBLE_REPOSITORIES) {
+    return [...repositories];
+  }
+  const activeOffset = repositories.findIndex(({ index }) => index === cursor);
+  const centeredStart =
+    activeOffset === -1
+      ? 0
+      : activeOffset - Math.floor(MAX_VISIBLE_REPOSITORIES / 2);
+  const start = Math.max(
+    0,
+    Math.min(centeredStart, repositories.length - MAX_VISIBLE_REPOSITORIES),
+  );
+  return repositories.slice(start, start + MAX_VISIBLE_REPOSITORIES);
 }
 
 /**
@@ -834,7 +1184,7 @@ function screenWorkspaceKey(screen: ManagerScreen): string | undefined {
  * @returns Human-readable action label.
  */
 function editorActionLabel(kind: EditorRow["kind"]): string {
-  if (kind === "add") return "Add repository or directory";
+  if (kind === "path") return "Add repository path";
   if (kind === "save") return "Save workspace";
   if (kind === "back") return "Back";
   return "";
@@ -851,7 +1201,7 @@ function footerForScreen(screen: ManagerScreen): string {
     return "Enter confirm · Esc back · Ctrl-C cancel";
   }
   if (screen.kind === "edit") {
-    return "↑/↓ move · Space select · Enter choose · Ctrl-C cancel";
+    return "Type to filter · ↑/↓ move · Space select · Enter choose · Ctrl-C cancel";
   }
   return "↑/↓ move · Enter choose · Ctrl-C cancel";
 }

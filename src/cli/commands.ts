@@ -114,7 +114,7 @@ export interface LinkCliCommand {
   exitCode: 0;
 
   /**
-   * Shared directory whose descendant repository wikis are discovered.
+   * Shared directory whose descendant repositories are shown by the finder.
    */
   directory: string;
 }

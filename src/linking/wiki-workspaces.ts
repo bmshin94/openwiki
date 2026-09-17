@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { UPDATE_METADATA_PATH } from "../config/constants.js";
 import { resolveOpenWikiHomeDir } from "../config/openwiki-home.js";
 import { writeTextAtomic } from "../integrations/install/atomic-file.js";
 import { restrictDirToCurrentUser } from "../platform/windows-acl.js";
@@ -29,11 +30,6 @@ const WIKI_WORKSPACES_VERSION = 1;
 const MAX_DISCOVERY_DEPTH = 8;
 
 /**
- * Maximum number of directories inspected by one discovery run.
- */
-const MAX_DISCOVERY_DIRECTORIES = 20_000;
-
-/**
  * Maximum supported serialized registry size.
  */
 const MAX_REGISTRY_BYTES = 2 * 1024 * 1024;
@@ -51,10 +47,16 @@ const MAX_REGISTERED_WORKSPACES = 1_000;
 /**
  * Directory names that cannot contain a separately linked repository wiki.
  */
-const IGNORED_DISCOVERY_DIRECTORIES = new Set([
-  ".git",
-  "node_modules",
-  "openwiki",
+const IGNORED_DISCOVERY_DIRECTORIES = new Set([".git", "node_modules"]);
+
+/**
+ * Filesystem outcomes expected while directories change during discovery.
+ */
+const EXPECTED_DISCOVERY_ERROR_CODES = new Set([
+  "EACCES",
+  "ENOENT",
+  "ENOTDIR",
+  "EPERM",
 ]);
 
 /**
@@ -80,6 +82,16 @@ export interface DiscoveredWiki {
    * Display path relative to the directory being inspected when possible.
    */
   path: string;
+}
+
+/**
+ * One Git repository shown by the interactive repository finder.
+ */
+export interface DiscoveredRepository extends DiscoveredWiki {
+  /**
+   * Whether the repository contains OpenWiki run metadata and can be linked.
+   */
+  hasOpenWiki: boolean;
 }
 
 /**
@@ -367,41 +379,52 @@ export function emptyWikiWorkspaceRegistry(): WikiWorkspaceRegistry {
 }
 
 /**
- * Discovers Git repositories containing generated OpenWiki documentation.
+ * Resolves the canonical directory used as the interactive finder root.
  *
- * Discovery never follows symbolic links and bounds both depth and total work.
+ * @param location - User-entered absolute, relative, or home-relative path.
+ * @param baseDirectory - Directory used to resolve a relative location.
+ * @returns Canonical absolute finder root.
+ */
+export async function resolveRepositoryFinderRoot(
+  location: string,
+  baseDirectory: string = process.cwd(),
+): Promise<string> {
+  return canonicalDirectory(resolveUserPath(location, baseDirectory));
+}
+
+/**
+ * Streams Git repositories below one directory for interactive filtering.
+ *
+ * Discovery never follows symbolic links, stops at each Git repository
+ * boundary, and bounds traversal depth without rejecting large code roots.
  *
  * @param startDirectory - Directory whose descendants should be inspected.
- * @returns Deterministically ordered repository wikis.
- * @throws {WikiWorkspaceError} When the directory is invalid or discovery is too broad.
+ * @param signal - Optional cancellation signal checked between filesystem reads.
+ * @returns Repositories in deterministic path order as they are found.
+ * @throws {WikiWorkspaceError} When the starting directory is invalid.
  */
-export async function discoverWikiRepositories(
+export async function* discoverRepositories(
   startDirectory: string,
-): Promise<DiscoveredWiki[]> {
+  signal?: AbortSignal,
+): AsyncGenerator<DiscoveredRepository> {
   const discoveryRoot = await canonicalDirectory(startDirectory);
   const pending: DiscoveryDirectory[] = [
     { directory: discoveryRoot, depth: 0 },
   ];
-  const discovered: DiscoveredWiki[] = [];
-  let visitedDirectories = 0;
 
   while (pending.length > 0) {
+    if (signal?.aborted) return;
     const current = pending.pop();
     if (!current) break;
-    visitedDirectories += 1;
-    if (visitedDirectories > MAX_DISCOVERY_DIRECTORIES) {
-      throw new WikiWorkspaceError(
-        "Wiki discovery is too broad. Add a narrower directory.",
-      );
-    }
 
-    if (await isWikiRepository(current.directory)) {
-      discovered.push(discoveredWiki(discoveryRoot, current.directory));
+    if (await isGitRepository(current.directory)) {
+      yield await discoveredRepository(discoveryRoot, current.directory);
       continue;
     }
 
     if (current.depth >= MAX_DISCOVERY_DEPTH) continue;
     const entries = await readDiscoveryDirectory(current.directory);
+    if (signal?.aborted) return;
     for (const entry of [...entries]
       .sort((left, right) => left.name.localeCompare(right.name))
       .reverse()) {
@@ -412,19 +435,17 @@ export async function discoverWikiRepositories(
       });
     }
   }
-
-  return discovered.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 /**
- * Resolves one user-entered repository or directory location.
+ * Resolves one user-entered direct repository location.
  *
- * A path inside a linkable repository returns only that repository. An ordinary
- * directory is scanned for descendant repository wikis.
+ * A path inside a linkable repository returns only that repository. This direct
+ * resolver never starts recursive discovery.
  *
- * @param location - Direct repository path, nested path, or directory to scan.
+ * @param location - Direct repository root or a nested path inside it.
  * @param baseDirectory - Directory used to resolve a relative location.
- * @returns Deterministically ordered repository wikis found at the location.
+ * @returns The single repository wiki found at the location.
  */
 export async function discoverWikiLocation(
   location: string,
@@ -433,15 +454,17 @@ export async function discoverWikiLocation(
   const resolved = resolveUserPath(location, baseDirectory);
   const directory = await canonicalDirectory(resolved);
   const containingRepository = await findContainingGitRepository(directory);
-  if (containingRepository) {
-    if (!(await isWikiRepository(containingRepository))) {
-      throw new WikiWorkspaceError(
-        "That repository does not contain openwiki/quickstart.md. Initialize its OpenWiki before linking it.",
-      );
-    }
-    return [discoveredWiki(directory, containingRepository)];
+  if (!containingRepository) {
+    throw new WikiWorkspaceError(
+      "That location is not inside a Git repository.",
+    );
   }
-  return discoverWikiRepositories(directory);
+  if (!(await hasOpenWikiMetadata(containingRepository))) {
+    throw new WikiWorkspaceError(
+      `That repository does not contain ${UPDATE_METADATA_PATH}. Initialize its OpenWiki before linking it.`,
+    );
+  }
+  return [discoveredWiki(directory, containingRepository)];
 }
 
 /**
@@ -1034,7 +1057,7 @@ async function canonicalWikiRoots(roots: readonly string[]): Promise<string[]> {
   for (const root of canonical) {
     if (!(await isWikiRepository(root))) {
       throw new WikiWorkspaceError(
-        "Every selected repository must contain openwiki/quickstart.md.",
+        `Every selected repository must contain ${UPDATE_METADATA_PATH}.`,
       );
     }
   }
@@ -1318,16 +1341,25 @@ async function findContainingGitRepository(
 }
 
 /**
- * Checks whether a directory is a Git repository with an OpenWiki quickstart.
+ * Checks whether a directory is a Git repository with OpenWiki run metadata.
  *
  * @param directory - Canonical candidate repository root.
  * @returns Whether the directory exposes a linkable repository wiki.
  */
 async function isWikiRepository(directory: string): Promise<boolean> {
   return (
-    (await isGitRepository(directory)) &&
-    (await isRegularFile(path.join(directory, "openwiki", "quickstart.md")))
+    (await isGitRepository(directory)) && (await hasOpenWikiMetadata(directory))
   );
+}
+
+/**
+ * Checks whether a repository contains the OpenWiki discovery marker.
+ *
+ * @param directory - Canonical repository root.
+ * @returns Whether OpenWiki has recorded repository run metadata.
+ */
+async function hasOpenWikiMetadata(directory: string): Promise<boolean> {
+  return isRegularFile(path.join(directory, UPDATE_METADATA_PATH));
 }
 
 /**
@@ -1340,8 +1372,9 @@ async function isGitRepository(directory: string): Promise<boolean> {
   try {
     const marker = await lstat(path.join(directory, ".git"));
     return marker.isDirectory() || marker.isFile();
-  } catch {
-    return false;
+  } catch (error) {
+    if (isExpectedDiscoveryError(error)) return false;
+    throw error;
   }
 }
 
@@ -1354,8 +1387,9 @@ async function isGitRepository(directory: string): Promise<boolean> {
 async function isRegularFile(filePath: string): Promise<boolean> {
   try {
     return (await lstat(filePath)).isFile();
-  } catch {
-    return false;
+  } catch (error) {
+    if (isExpectedDiscoveryError(error)) return false;
+    throw error;
   }
 }
 
@@ -1371,10 +1405,20 @@ async function readDiscoveryDirectory(
   try {
     return await readdir(directory, { withFileTypes: true, encoding: "utf8" });
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EACCES" || code === "EPERM") return [];
+    if (isExpectedDiscoveryError(error)) return [];
     throw new WikiWorkspaceError("Unable to inspect the wiki location.");
   }
+}
+
+/**
+ * Identifies missing, moved, or inaccessible paths expected during scanning.
+ *
+ * @param error - Unknown filesystem failure.
+ * @returns Whether discovery may safely treat the path as unavailable.
+ */
+function isExpectedDiscoveryError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return typeof code === "string" && EXPECTED_DISCOVERY_ERROR_CODES.has(code);
 }
 
 /**
@@ -1401,6 +1445,42 @@ function isDiscoverableDirectory(entry: Dirent<string>): boolean {
  * @returns Discovered wiki metadata.
  */
 function discoveredWiki(
+  displayRoot: string,
+  repositoryRoot: string,
+): DiscoveredWiki {
+  const repository = discoveredRepositoryMetadata(displayRoot, repositoryRoot);
+  return {
+    root: repository.root,
+    name: repository.name,
+    path: repository.path,
+  };
+}
+
+/**
+ * Creates one repository-finder entry and checks its OpenWiki marker.
+ *
+ * @param displayRoot - Directory against which the path should be displayed.
+ * @param repositoryRoot - Canonical repository root.
+ * @returns Display metadata and linkability for one Git repository.
+ */
+async function discoveredRepository(
+  displayRoot: string,
+  repositoryRoot: string,
+): Promise<DiscoveredRepository> {
+  return {
+    ...discoveredRepositoryMetadata(displayRoot, repositoryRoot),
+    hasOpenWiki: await hasOpenWikiMetadata(repositoryRoot),
+  };
+}
+
+/**
+ * Creates terminal-safe display metadata shared by finder and selected rows.
+ *
+ * @param displayRoot - Directory against which the path should be displayed.
+ * @param repositoryRoot - Canonical repository root.
+ * @returns Display metadata for one Git repository.
+ */
+function discoveredRepositoryMetadata(
   displayRoot: string,
   repositoryRoot: string,
 ): DiscoveredWiki {
