@@ -31,6 +31,22 @@ async function moveDown(
 }
 
 /**
+ * Sends individual Backspace key presses to a rendered manager.
+ *
+ * @param write - Ink stdin writer.
+ * @param count - Number of characters to remove.
+ */
+async function backspace(
+  write: (value: string) => void,
+  count: number,
+): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    write("\u007f");
+    await flush();
+  }
+}
+
+/**
  * Creates a deterministic streaming repository finder for component tests.
  *
  * @param repositories - Repository rows yielded in order.
@@ -38,14 +54,19 @@ async function moveDown(
  */
 function repositoryFinder(
   ...repositories: readonly DiscoveredRepository[]
-): (signal: AbortSignal) => AsyncIterable<DiscoveredRepository> {
+): (
+  finderPath: string,
+  signal: AbortSignal,
+) => AsyncIterable<DiscoveredRepository> {
   /**
    * Yields the supplied repository fixtures without filesystem access.
    */
   async function* findRepositories(
+    finderPath: string,
     signal: AbortSignal,
   ): AsyncGenerator<DiscoveredRepository> {
     await Promise.resolve();
+    if (!finderPath) return;
     for (const repository of repositories) {
       if (signal.aborted) return;
       yield repository;
@@ -181,7 +202,7 @@ describe("WikiWorkspaceManager", () => {
     await flush();
     view.stdin.write("\r");
     await flush();
-    await moveDown(view.stdin.write, 2);
+    await moveDown(view.stdin.write, 4);
     view.stdin.write("\r");
     await flush();
     view.stdin.write("/elsewhere/infra");
@@ -191,7 +212,7 @@ describe("WikiWorkspaceManager", () => {
     await flush();
 
     expect(discoverLocation).toHaveBeenCalledWith("/elsewhere/infra");
-    expect(stripAnsi(view.lastFrame())).toContain("[x] infra");
+    expect(stripAnsi(view.lastFrame())).toContain("● /elsewhere/infra");
     view.unmount();
   });
 
@@ -232,13 +253,19 @@ describe("WikiWorkspaceManager", () => {
     await flush();
     view.stdin.write("\r");
     await flush();
-    view.stdin.write("ordinary");
+
+    const unfiltered = stripAnsi(view.lastFrame());
+    expect(unfiltered.split("● /workspace/control")).toHaveLength(3);
+    expect(unfiltered.split("● /workspace/data")).toHaveLength(3);
+    expect(unfiltered).toContain("○ /workspace/openwiki");
+
+    view.stdin.write("/ordinary");
     await flush();
 
     const filtered = stripAnsi(view.lastFrame());
     expect(filtered).toContain("Selected repositories");
-    expect(filtered).toContain("[x] control");
-    expect(filtered).toContain("[x] data");
+    expect(filtered).toContain("● /workspace/control");
+    expect(filtered).toContain("● /workspace/data");
     expect(filtered).toContain("ordinary");
     expect(filtered).not.toContain("openwiki");
 
@@ -247,7 +274,78 @@ describe("WikiWorkspaceManager", () => {
     expect(stripAnsi(view.lastFrame())).toContain(
       "This repository does not contain OpenWiki documentation.",
     );
-    expect(stripAnsi(view.lastFrame())).not.toContain("[x] ordinary");
+    expect(stripAnsi(view.lastFrame())).not.toContain("● /workspace/ordinary");
+    view.unmount();
+  });
+
+  test("extends the finder root with a path prefix", async () => {
+    const view = render(
+      <WikiWorkspaceManager
+        initialWorkspaces={[
+          {
+            id: "payments",
+            name: "Payments",
+            roots: ["/workspace/control", "/workspace/data"],
+          },
+        ]}
+        finderRoot="/workspace"
+        findRepositories={repositoryFinder(
+          {
+            root: "/workspace/docs",
+            name: "docs",
+            path: "docs",
+            hasOpenWiki: true,
+          },
+          {
+            root: "/workspace/openwiki-swebench-pilot/django",
+            name: "django",
+            path: "openwiki-swebench-pilot/django",
+            hasOpenWiki: false,
+          },
+          {
+            root: "/workspace/deepagents",
+            name: "deepagents",
+            path: "deepagents",
+            hasOpenWiki: true,
+          },
+        )}
+        discoverLocation={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    await flush();
+    await flush();
+
+    view.stdin.write("\r");
+    await flush();
+    view.stdin.write("\r");
+    await flush();
+    view.stdin.write("/docs");
+    await flush();
+
+    const docsPath = stripAnsi(view.lastFrame());
+    expect(docsPath).toContain("Path: /workspace/docs_");
+    expect(docsPath).toContain("○ /workspace/docs");
+    expect(docsPath).not.toContain("django");
+    expect(docsPath).not.toContain("deepagents");
+
+    await backspace(view.stdin.write, 5);
+    view.stdin.write("/deep");
+    await flush();
+
+    const pathSearch = stripAnsi(view.lastFrame());
+    expect(pathSearch).toContain("Path: /workspace/deep_");
+    expect(pathSearch).toContain("○ /workspace/deepagents");
+    expect(pathSearch).not.toContain("/workspace/docs");
+
+    await backspace(view.stdin.write, 5);
+    expect(stripAnsi(view.lastFrame())).toContain("Path: /workspace_");
+
+    await backspace(view.stdin.write, 10);
+    view.stdin.write("\u007f");
+    await flush();
+    expect(stripAnsi(view.lastFrame())).toContain("Path: ~_");
     view.unmount();
   });
 });

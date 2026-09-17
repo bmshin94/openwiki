@@ -14,6 +14,7 @@ import {
   WIKI_WORKSPACES_FILE,
   clearActiveWikiWorkspace,
   discoverRepositories,
+  discoverRepositoriesFromPath,
   discoverWikiLocation,
   listWikiWorkspaces,
   listWorkspaceWikis,
@@ -146,6 +147,18 @@ describe("wiki workspaces", () => {
       discoverWikiLocation(path.join(control, "src/nested")),
     ).resolves.toEqual([
       { root: control, name: "control-plane", path: control },
+    ]);
+    await expect(
+      collectRepositories(
+        discoverRepositoriesFromPath(path.join(directory, "services", "data")),
+      ),
+    ).resolves.toEqual([
+      {
+        root: path.join(directory, "services/data-plane"),
+        name: "data-plane",
+        path: "data-plane",
+        hasOpenWiki: true,
+      },
     ]);
   });
 

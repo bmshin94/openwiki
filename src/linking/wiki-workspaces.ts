@@ -393,6 +393,27 @@ export async function resolveRepositoryFinderRoot(
 }
 
 /**
+ * Streams repositories from the nearest existing directory for an editable path.
+ *
+ * A partial path such as `~/de` searches from its existing parent so the caller
+ * can filter streamed repository paths while the user continues typing.
+ *
+ * @param location - Complete or partial user-entered finder path.
+ * @param baseDirectory - Directory used to resolve a relative location.
+ * @param signal - Optional cancellation signal forwarded to discovery.
+ * @returns Repositories below the nearest existing directory.
+ */
+export async function* discoverRepositoriesFromPath(
+  location: string,
+  baseDirectory: string = process.cwd(),
+  signal?: AbortSignal,
+): AsyncGenerator<DiscoveredRepository> {
+  const requested = resolveUserPath(location, baseDirectory);
+  const discoveryRoot = await nearestExistingDirectory(requested);
+  yield* discoverRepositories(discoveryRoot, signal);
+}
+
+/**
  * Streams Git repositories below one directory for interactive filtering.
  *
  * Discovery never follows symbolic links, stops at each Git repository
@@ -1319,6 +1340,32 @@ async function canonicalDirectory(directory: string): Promise<string> {
     return canonical;
   } catch {
     throw new WikiWorkspaceError("The wiki location does not exist.");
+  }
+}
+
+/**
+ * Walks lexically upward until a real existing directory can be canonicalized.
+ *
+ * @param location - Absolute complete or partial filesystem path.
+ * @returns Canonical nearest existing directory.
+ * @throws {WikiWorkspaceError} When no usable ancestor can be inspected.
+ */
+async function nearestExistingDirectory(location: string): Promise<string> {
+  let candidate = path.resolve(location);
+  while (true) {
+    try {
+      const canonical = await realpath(candidate);
+      if ((await lstat(canonical)).isDirectory()) return canonical;
+    } catch (error) {
+      if (!isExpectedDiscoveryError(error)) {
+        throw new WikiWorkspaceError("Unable to inspect the repository path.");
+      }
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) {
+      throw new WikiWorkspaceError("Unable to inspect the repository path.");
+    }
+    candidate = parent;
   }
 }
 

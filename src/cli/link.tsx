@@ -4,7 +4,7 @@ import { render } from "ink";
 import { resolveRepositoryRoot } from "../integrations/core/repository-root.js";
 import {
   clearActiveWikiWorkspace,
-  discoverRepositories,
+  discoverRepositoriesFromPath,
   discoverWikiLocation,
   listWikiWorkspaces,
   readWikiWorkspaceRegistry,
@@ -42,7 +42,8 @@ export async function runLinkCommand(
     const result = await manageWikiWorkspaces(
       workspaceDrafts(registry),
       finderRoot,
-      (signal) => discoverRepositories(finderRoot, signal),
+      (finderPath, signal) =>
+        discoverRepositoriesFromPath(finderPath, baseDirectory, signal),
       (location) => discoverWikiLocation(location, baseDirectory),
     );
     if (!result) {
@@ -104,6 +105,7 @@ async function manageWikiWorkspaces(
   initialWorkspaces: readonly WikiWorkspaceDraft[],
   finderRoot: string,
   findRepositories: (
+    finderPath: string,
     signal: AbortSignal,
   ) => AsyncIterable<DiscoveredRepository>,
   discoverLocation: (location: string) => Promise<DiscoveredWiki[]>,

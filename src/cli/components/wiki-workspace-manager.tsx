@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import type {
@@ -27,9 +29,10 @@ export interface WikiWorkspaceManagerProps {
   finderRoot: string;
 
   /**
-   * Creates one streaming scan of Git repositories below the finder root.
+   * Creates one streaming scan for the current editable finder path.
    */
   findRepositories: (
+    finderPath: string,
     signal: AbortSignal,
   ) => AsyncIterable<DiscoveredRepository>;
 
@@ -173,6 +176,11 @@ interface EditorRow {
    * Repository associated with a selected or finder row.
    */
   repository?: DiscoveredRepository;
+
+  /**
+   * Whether a finder result is also present in the pinned selection.
+   */
+  selected?: boolean;
 }
 
 /**
@@ -212,8 +220,14 @@ export function WikiWorkspaceManager({
       key: workspace.id ?? temporaryWorkspaceKey(),
     })),
   );
-  const [repositories, setRepositories] = useState<DiscoveredRepository[]>(() =>
-    workspaceRepositories(initialWorkspaces),
+  const [knownRepositories, setKnownRepositories] = useState<
+    DiscoveredRepository[]
+  >(() => workspaceRepositories(initialWorkspaces));
+  const [scannedRepositories, setScannedRepositories] = useState<
+    DiscoveredRepository[]
+  >([]);
+  const [finderPath, setFinderPath] = useState(() =>
+    displayRepositoryPath(finderRoot),
   );
   const [screen, setScreen] = useState<ManagerScreen>({ kind: "workspaces" });
   const [cursor, setCursor] = useState(0);
@@ -227,9 +241,13 @@ export function WikiWorkspaceManager({
     "workspaceKey" in screen
       ? workspaces.find((workspace) => workspace.key === screen.workspaceKey)
       : undefined;
+  const repositories = useMemo(
+    () => mergeRepositories(knownRepositories, scannedRepositories),
+    [knownRepositories, scannedRepositories],
+  );
   const editorRows = useMemo<EditorRow[]>(
-    () => createEditorRows(repositories, editRoots, input),
-    [editRoots, input, repositories],
+    () => createEditorRows(repositories, editRoots, finderPath),
+    [editRoots, finderPath, repositories],
   );
 
   useEffect(() => {
@@ -241,9 +259,14 @@ export function WikiWorkspaceManager({
      */
     async function scanRepositories(): Promise<void> {
       try {
-        for await (const repository of findRepositories(controller.signal)) {
+        setScanning(true);
+        setScannedRepositories([]);
+        for await (const repository of findRepositories(
+          finderPath,
+          controller.signal,
+        )) {
           if (!active) return;
-          setRepositories((current) =>
+          setScannedRepositories((current) =>
             mergeRepositories(current, [repository]),
           );
         }
@@ -265,7 +288,7 @@ export function WikiWorkspaceManager({
       active = false;
       controller.abort();
     };
-  }, [findRepositories]);
+  }, [findRepositories, finderPath]);
 
   /**
    * Returns to a screen with reset navigation feedback.
@@ -349,7 +372,7 @@ export function WikiWorkspaceManager({
         setMessage("No OpenWiki repository was found at that location.");
         return;
       }
-      setRepositories((current) =>
+      setKnownRepositories((current) =>
         mergeRepositories(
           current,
           found.map((repository) => ({
@@ -390,7 +413,16 @@ export function WikiWorkspaceManager({
       return;
     }
     if (row.kind !== "selected" && row.kind !== "repository") return;
+    const wasSelected = editRoots.has(row.repository.root);
+    if (!wasSelected) {
+      setKnownRepositories((current) =>
+        mergeRepositories(current, [row.repository!]),
+      );
+    }
     setEditRoots((current) => toggleSelection(current, row.repository!.root));
+    if (row.kind === "repository") {
+      setCursor((current) => Math.max(0, current + (wasSelected ? -1 : 1)));
+    }
     setMessage(null);
   }
 
@@ -446,14 +478,8 @@ export function WikiWorkspaceManager({
     }
 
     if (screen.kind === "edit") {
-      if (key.escape && input) {
-        setInput("");
-        setCursor(0);
-        setMessage(null);
-        return;
-      }
       if (key.backspace || key.delete) {
-        setInput((current) => current.slice(0, -1));
+        setFinderPath(backspaceFinderPath);
         setCursor(editRoots.size);
         setMessage(null);
         return;
@@ -465,7 +491,7 @@ export function WikiWorkspaceManager({
       if (!key.return && !key.ctrl && !key.meta) {
         const printable = printableInput(inputValue);
         if (printable) {
-          setInput((current) => `${current}${printable}`.slice(0, 2_000));
+          setFinderPath((current) => `${current}${printable}`.slice(0, 2_000));
           setCursor(editRoots.size);
           setMessage(null);
         }
@@ -567,8 +593,7 @@ export function WikiWorkspaceManager({
           workspace={selectedWorkspace}
           rows={editorRows}
           cursor={cursor}
-          filter={input}
-          finderRoot={finderRoot}
+          finderPath={finderPath}
           scanning={scanning}
         />
       ) : null}
@@ -691,14 +716,9 @@ interface WorkspaceEditorProps {
   cursor: number;
 
   /**
-   * Current fuzzy repository filter.
+   * Complete editable repository discovery path.
    */
-  filter: string;
-
-  /**
-   * Canonical root searched by the repository finder.
-   */
-  finderRoot: string;
+  finderPath: string;
 
   /**
    * Whether repository discovery is still producing results.
@@ -716,8 +736,7 @@ function WorkspaceEditor({
   workspace,
   rows,
   cursor,
-  filter,
-  finderRoot,
+  finderPath,
   scanning,
 }: WorkspaceEditorProps): React.JSX.Element {
   const indexedRows = rows.map((row, index) => ({ row, index }));
@@ -752,15 +771,13 @@ function WorkspaceEditor({
           />
         ))}
         <Box flexDirection="column" marginTop={1}>
-          <Text>Find repositories</Text>
-          <Text dimColor>{finderRoot}</Text>
-          <Text color="cyan">Filter: {filter}_</Text>
+          <Text color="cyan">Path: {finderPath}_</Text>
           {visibleRepositories.map(({ row, index }) => (
             <RepositoryMenuRow
               key={`repository:${row.repository!.root}`}
               repository={row.repository!}
               active={cursor === index}
-              selected={false}
+              selected={row.selected === true}
             />
           ))}
           {repositoryRows.length === 0 ? (
@@ -818,11 +835,8 @@ function RepositoryMenuRow({
   const selectable = selected || repository.hasOpenWiki;
   return (
     <MenuText active={active} dimmed={!selectable}>
-      {selectable ? `[${selected ? "x" : " "}] ` : "    "}
-      {repository.name}
-      {repository.path === repository.name ? null : (
-        <Text dimColor> {repository.path}</Text>
-      )}
+      {selectable ? `${selected ? "●" : "○"} ` : "  "}
+      {displayRepositoryPath(repository.root)}
     </MenuText>
   );
 }
@@ -1010,13 +1024,13 @@ function mergeRepositories(
  *
  * @param repositories - Complete streamed and persisted repository collection.
  * @param selectedRoots - Canonical roots selected for the workspace draft.
- * @param filter - User-entered fuzzy repository filter.
+ * @param finderPath - Complete editable repository path prefix.
  * @returns Complete navigable editor row collection.
  */
 function createEditorRows(
   repositories: readonly DiscoveredRepository[],
   selectedRoots: ReadonlySet<string>,
-  filter: string,
+  finderPath: string,
 ): EditorRow[] {
   const byRoot = new Map(
     repositories.map((repository) => [repository.root, repository]),
@@ -1032,18 +1046,17 @@ function createEditorRows(
         },
     )
     .sort(compareRepositories);
-  const matches = rankRepositories(
-    repositories.filter((repository) => !selectedRoots.has(repository.root)),
-    filter,
-  );
+  const matches = rankRepositories(repositories, finderPath);
   return [
     ...selected.map((repository) => ({
       kind: "selected" as const,
       repository,
+      selected: true,
     })),
     ...matches.map((repository) => ({
       kind: "repository" as const,
       repository,
+      selected: selectedRoots.has(repository.root),
     })),
     { kind: "path" },
     { kind: "save" },
@@ -1052,25 +1065,22 @@ function createEditorRows(
 }
 
 /**
- * Ranks repository names and display paths by a linear fuzzy match.
+ * Ranks repositories whose paths begin with the composed finder path.
  *
  * @param repositories - Unselected repositories available to search.
- * @param filter - User-entered fuzzy query.
+ * @param finderPath - Complete editable repository path prefix.
  * @returns Matching repositories ordered by relevance then name and path.
  */
 function rankRepositories(
   repositories: readonly DiscoveredRepository[],
-  filter: string,
+  finderPath: string,
 ): DiscoveredRepository[] {
-  const query = filter.trim().toLocaleLowerCase();
+  const query = finderPath.trim().toLowerCase();
   if (!query) return [...repositories].sort(compareRepositories);
   return repositories
     .map((repository) => ({
       repository,
-      score: fuzzyMatchScore(
-        `${repository.name} ${repository.path}`.toLocaleLowerCase(),
-        query,
-      ),
+      score: pathPrefixScore(repository, query),
     }))
     .filter(
       (match): match is { repository: DiscoveredRepository; score: number } =>
@@ -1085,24 +1095,57 @@ function rankRepositories(
 }
 
 /**
- * Scores an ordered character-subsequence match without regular expressions.
+ * Scores a path-like query against canonical, home-relative, and finder paths.
  *
- * Consecutive characters and matches near the beginning receive lower scores.
- *
- * @param value - Normalized repository name and display path.
- * @param query - Normalized non-empty filter text.
- * @returns Match score, or `null` when the query is not a subsequence.
+ * @param repository - Repository candidate to score.
+ * @param query - Normalized path-like search text.
+ * @returns Prefix score, or `null` when no repository path starts with it.
  */
-function fuzzyMatchScore(value: string, query: string): number | null {
-  let previousIndex = -1;
-  let score = 0;
-  for (const character of query) {
-    const index = value.indexOf(character, previousIndex + 1);
-    if (index === -1) return null;
-    score += index - previousIndex - 1;
-    previousIndex = index;
-  }
-  return score + previousIndex / Math.max(value.length, 1);
+function pathPrefixScore(
+  repository: DiscoveredRepository,
+  query: string,
+): number | null {
+  const normalizedQuery = normalizeSearchPath(query);
+  const displayed = normalizeSearchPath(
+    displayRepositoryPath(repository.root).toLowerCase(),
+  );
+  const candidates = [
+    displayed,
+    normalizeSearchPath(repository.root.toLowerCase()),
+    normalizeSearchPath(repository.path.toLowerCase()),
+    ...(displayed.startsWith("~/") ? [displayed.slice(2)] : []),
+  ];
+  return candidates.some((candidate) => candidate.startsWith(normalizedQuery))
+    ? 0
+    : null;
+}
+
+/**
+ * Normalizes path separators for comparison without resolving user input.
+ *
+ * @param value - Displayed or user-entered path.
+ * @returns Forward-slash path used only for matching.
+ */
+function normalizeSearchPath(value: string): string {
+  return value.replaceAll("\\", "/");
+}
+
+/**
+ * Produces one compact path rooted at the user's home when possible.
+ *
+ * @param repositoryRoot - Canonical absolute repository root.
+ * @returns Home-relative or absolute display path.
+ */
+function displayRepositoryPath(repositoryRoot: string): string {
+  const relative = path.relative(os.homedir(), repositoryRoot);
+  const insideHome =
+    relative === "" ||
+    (!path.isAbsolute(relative) &&
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`));
+  if (!insideHome) return repositoryRoot;
+  if (!relative) return "~";
+  return `~/${relative.split(path.sep).join("/")}`;
 }
 
 /**
@@ -1201,7 +1244,7 @@ function footerForScreen(screen: ManagerScreen): string {
     return "Enter confirm · Esc back · Ctrl-C cancel";
   }
   if (screen.kind === "edit") {
-    return "Type to filter · ↑/↓ move · Space select · Enter choose · Ctrl-C cancel";
+    return "Type to extend path · ↑/↓ move · Space select · Enter choose · Ctrl-C cancel";
   }
   return "↑/↓ move · Enter choose · Ctrl-C cancel";
 }
@@ -1245,6 +1288,19 @@ function printableInput(value: string): string {
   return [...value]
     .filter((character) => character >= " " && character !== "\u007f")
     .join("");
+}
+
+/**
+ * Removes one editable path character while keeping home as the empty state.
+ *
+ * @param value - Current complete finder path.
+ * @returns Shortened path, never an empty string.
+ */
+function backspaceFinderPath(value: string): string {
+  if (value === "~") return value;
+  const characters = [...value];
+  characters.pop();
+  return characters.join("") || "~";
 }
 
 /**
