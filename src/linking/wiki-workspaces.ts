@@ -632,13 +632,14 @@ export async function listWikiWorkspaces(
   options: WikiWorkspaceStorageOptions = {},
 ): Promise<WikiWorkspaceList> {
   const context = await loadRepositoryContext(repositoryRoot, options);
-  const wiki = wikiId
-    ? findReachableWiki(context.registry, context.current, wikiId)
-    : context.current;
-  const workspaces = containingWorkspaces(context.registry, wiki.id);
-  const activeWorkspace = context.registry.active.find(
-    (selection) => selection.wiki === wiki.id,
-  )?.workspace;
+  const wiki = wikiId ? findReachableWiki(context, wikiId) : context.current;
+  const workspaces = context.isRegistered
+    ? containingWorkspaces(context.registry, wiki.id)
+    : [];
+  const activeWorkspace = context.isRegistered
+    ? context.registry.active.find((selection) => selection.wiki === wiki.id)
+        ?.workspace
+    : undefined;
   return {
     wiki: wikiIdentity(wiki),
     ...(activeWorkspace ? { activeWorkspace } : {}),
@@ -660,11 +661,7 @@ export async function listWorkspaceWikis(
   options: WikiWorkspaceStorageOptions = {},
 ): Promise<WorkspaceWikiList> {
   const context = await loadRepositoryContext(repositoryRoot, options);
-  const workspace = resolveContainingWorkspace(
-    context.registry,
-    context.current,
-    workspaceReference,
-  );
+  const workspace = resolveContainingWorkspace(context, workspaceReference);
   return {
     workspace: workspaceSummary(workspace),
     wikis: workspace.wikis.map((id) =>
@@ -687,16 +684,20 @@ export async function resolveWikiSearchScope(
   options: WikiWorkspaceStorageOptions = {},
 ): Promise<WikiSearchScope> {
   const context = await loadRepositoryContext(repositoryRoot, options);
+  if (!context.isRegistered) {
+    if (requestedWorkspace) requireRegisteredRepository(context);
+    return {
+      status: "ready",
+      current: wikiIdentity(context.current),
+      wikis: [{ ...wikiIdentity(context.current), root: context.current.root }],
+    };
+  }
   const containing = containingWorkspaces(context.registry, context.current.id);
   if (requestedWorkspace) {
     return materializeSearchScope(
       context.registry,
       context.current,
-      resolveContainingWorkspace(
-        context.registry,
-        context.current,
-        requestedWorkspace,
-      ),
+      resolveContainingWorkspace(context, requestedWorkspace),
     );
   }
   if (containing.length === 0) {
@@ -748,12 +749,14 @@ export async function resolveReadableWiki(
   options: WikiWorkspaceStorageOptions = {},
 ): Promise<ResolvedWiki> {
   const context = await loadRepositoryContext(repositoryRoot, options);
+  if (!context.isRegistered) {
+    if (wikiId) requireRegisteredRepository(context);
+    return { ...wikiIdentity(context.current), root: context.current.root };
+  }
   if (!wikiId || wikiId === context.current.id) {
     return { ...wikiIdentity(context.current), root: context.current.root };
   }
-  return materializeWiki(
-    findReachableWiki(context.registry, context.current, wikiId),
-  );
+  return materializeWiki(findReachableWiki(context, wikiId));
 }
 
 /**
@@ -770,11 +773,7 @@ export async function setActiveWikiWorkspace(
   options: WikiWorkspaceStorageOptions = {},
 ): Promise<WikiWorkspaceSummary> {
   const context = await loadRepositoryContext(repositoryRoot, options);
-  const workspace = resolveContainingWorkspace(
-    context.registry,
-    context.current,
-    workspaceReference,
-  );
+  const workspace = resolveContainingWorkspace(context, workspaceReference);
   const active = context.registry.active.filter(
     (selection) => selection.wiki !== context.current.id,
   );
@@ -796,6 +795,7 @@ export async function clearActiveWikiWorkspace(
   options: WikiWorkspaceStorageOptions = {},
 ): Promise<boolean> {
   const context = await loadRepositoryContext(repositoryRoot, options);
+  requireRegisteredRepository(context);
   const active = context.registry.active.filter(
     (selection) => selection.wiki !== context.current.id,
   );
@@ -838,6 +838,11 @@ interface RepositoryContext {
    * Current repository wiki, registered or local-only.
    */
   current: RegisteredWiki;
+
+  /**
+   * Whether current was identified by an exact canonical-root registry match.
+   */
+  isRegistered: boolean;
 }
 
 /**
@@ -853,24 +858,39 @@ async function loadRepositoryContext(
 ): Promise<RepositoryContext> {
   const root = await canonicalDirectory(repositoryRoot);
   const registry = await readWikiWorkspaceRegistry(options);
-  const current =
-    registry.wikis.find((wiki) => wiki.root === root) ?? localWiki(root);
-  return { registry, current };
+  const registered = registry.wikis.find((wiki) => wiki.root === root);
+  const current = registered ?? localWiki(root);
+  return { registry, current, isRegistered: registered !== undefined };
+}
+
+/**
+ * Rejects workspace operations whose repository identity is only local.
+ *
+ * Local fallback IDs are display conveniences and must never authorize access
+ * to registered wikis or mutate registered workspace state.
+ *
+ * @param context - Current repository and registry context.
+ */
+function requireRegisteredRepository(context: RepositoryContext): void {
+  if (context.isRegistered) return;
+  throw new WikiWorkspaceError(
+    "The current repository is not registered in a wiki workspace. Link it before accessing or changing workspace wikis.",
+  );
 }
 
 /**
  * Resolves one requested wiki while keeping traversal within shared workspaces.
  *
- * @param registry - Strict global registry.
- * @param current - Current repository wiki.
+ * @param context - Current registered repository and strict global registry.
  * @param wikiId - Requested stable wiki ID.
  * @returns Reachable registered wiki.
  */
 function findReachableWiki(
-  registry: WikiWorkspaceRegistry,
-  current: RegisteredWiki,
+  context: RepositoryContext,
   wikiId: string,
 ): RegisteredWiki {
+  requireRegisteredRepository(context);
+  const { registry, current } = context;
   if (wikiId === current.id) return current;
   const target = registry.wikis.find((wiki) => wiki.id === wikiId);
   if (!target) {
@@ -894,16 +914,16 @@ function findReachableWiki(
 /**
  * Resolves a workspace reference and verifies current-wiki membership.
  *
- * @param registry - Strict global registry.
- * @param current - Current repository wiki.
+ * @param context - Current registered repository and strict global registry.
  * @param reference - Stable ID or case-insensitive workspace name.
  * @returns Matching containing workspace.
  */
 function resolveContainingWorkspace(
-  registry: WikiWorkspaceRegistry,
-  current: RegisteredWiki,
+  context: RepositoryContext,
   reference: string,
 ): WikiWorkspace {
+  requireRegisteredRepository(context);
+  const { registry, current } = context;
   const normalized = reference.trim().toLowerCase();
   const workspace = registry.workspaces.find(
     (candidate) =>

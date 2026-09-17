@@ -18,6 +18,7 @@ import {
   listWikiWorkspaces,
   listWorkspaceWikis,
   readWikiWorkspaceRegistry,
+  resolveReadableWiki,
   resolveWikiSearchScope,
   saveWikiWorkspaces,
   setActiveWikiWorkspace,
@@ -276,6 +277,79 @@ describe("wiki workspaces", () => {
     await expect(clearActiveWikiWorkspace(shared, storage)).resolves.toBe(
       false,
     );
+  });
+
+  test("does not authorize an unregistered repository by a colliding local ID", async () => {
+    const directory = await createTemporaryRoot("openwiki-collision-");
+    const storage = await createStorage();
+    const registered = await createWikiRepository(
+      directory,
+      "registered/control-plane",
+    );
+    const peer = await createWikiRepository(directory, "registered/data-plane");
+    const unregistered = await createWikiRepository(
+      directory,
+      "unregistered/control-plane",
+    );
+    await saveWikiWorkspaces(
+      [{ name: "Payments", roots: [registered, peer] }],
+      storage,
+    );
+
+    await expect(
+      listWikiWorkspaces(unregistered, undefined, storage),
+    ).resolves.toEqual({
+      wiki: { id: "control-plane", name: "control-plane" },
+      workspaces: [],
+    });
+    await expect(
+      resolveWikiSearchScope(unregistered, undefined, storage),
+    ).resolves.toEqual({
+      status: "ready",
+      current: { id: "control-plane", name: "control-plane" },
+      wikis: [
+        {
+          id: "control-plane",
+          name: "control-plane",
+          root: unregistered,
+        },
+      ],
+    });
+    await expect(
+      resolveReadableWiki(unregistered, undefined, storage),
+    ).resolves.toEqual({
+      id: "control-plane",
+      name: "control-plane",
+      root: unregistered,
+    });
+
+    const registrationError = "not registered in a wiki workspace";
+    await expect(
+      listWikiWorkspaces(unregistered, "control-plane", storage),
+    ).rejects.toThrow(registrationError);
+    await expect(
+      listWorkspaceWikis(unregistered, "payments", storage),
+    ).rejects.toThrow(registrationError);
+    await expect(
+      resolveWikiSearchScope(unregistered, "payments", storage),
+    ).rejects.toThrow(registrationError);
+    await expect(
+      resolveReadableWiki(unregistered, "control-plane", storage),
+    ).rejects.toThrow(registrationError);
+    await expect(
+      resolveReadableWiki(unregistered, "data-plane", storage),
+    ).rejects.toThrow(registrationError);
+    await expect(
+      setActiveWikiWorkspace(unregistered, "payments", storage),
+    ).rejects.toThrow(registrationError);
+
+    await setActiveWikiWorkspace(registered, "payments", storage);
+    await expect(
+      clearActiveWikiWorkspace(unregistered, storage),
+    ).rejects.toThrow(registrationError);
+    await expect(readWikiWorkspaceRegistry(storage)).resolves.toMatchObject({
+      active: [{ wiki: "control-plane", workspace: "payments" }],
+    });
   });
 
   test("retains stable IDs across edits and removes invalid active selections", async () => {
